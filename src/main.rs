@@ -71,12 +71,9 @@ async fn main() -> Result<(), anyhow::Error> {
             "/version",
             axum::routing::get(|| async { build::CLAP_LONG_VERSION }),
         )
-        .route("/login", axum::routing::post(crate::web::login::login))
-        .route("/logout", axum::routing::post(crate::web::login::logout))
-        .route(
-            "/oauth/callback",
-            axum::routing::get(crate::web::login::callback),
-        )
+        .route("/login", axum::routing::post(crate::web::login))
+        .route("/logout", axum::routing::post(crate::web::logout))
+        .route("/oauth/callback", axum::routing::get(crate::web::callback))
         .layer(axum_login::AuthManagerLayerBuilder::new(backend, session_layer).build())
         .layer(
             tower_http::cors::CorsLayer::very_permissive(), // .allow_credentials(true)

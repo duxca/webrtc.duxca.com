@@ -8,30 +8,9 @@ RUN curl -o /tmp/sccache.tgz -L https://github.com/mozilla/sccache/releases/down
   mv /tmp/sccache*/sccache /usr/local/bin && \
   rm -rf /tmp/sccache*
 
-RUN \
-  --mount=type=cache,target=/var/lib/apt,sharing=locked \
-  --mount=type=cache,target=/var/cache/apt,sharing=locked \
-  apt-get update && apt-get install -y \
-  libsqlite3-dev
-
-ADD https://github.com/benbjohnson/litestream/releases/download/v0.3.13/litestream-v0.3.13-linux-amd64.tar.gz /tmp/litestream.tar.gz
-RUN tar -C ./ -xzf /tmp/litestream.tar.gz
-
-RUN rustup target add wasm32-unknown-unknown
-
 ENV CARGO_HOME=/var/cache/cargo
 ENV RUSTC_WRAPPER=/usr/local/bin/sccache
 ENV SCCACHE_DIR=/var/cache/sccache
-
-RUN \
-  --mount=type=cache,target=/var/cache/cargo \
-  --mount=type=cache,target=/var/cache/sccache \
-  cargo install --locked trunk
-
-RUN \
-  --mount=type=cache,target=/var/cache/cargo \
-  --mount=type=cache,target=/var/cache/sccache \
-  cargo install -f sqlx-cli --no-default-features --features sqlite
 
 COPY . .
 
@@ -44,15 +23,7 @@ RUN \
   # --mount=type=cache,target=./target \
   --mount=type=cache,target=/var/cache/cargo \
   --mount=type=cache,target=/var/cache/sccache \
-  cd browser && /var/cache/cargo/bin/trunk build --release --public-url ./
-
-# RUN cargo sqlx migrate run
-
-RUN \
-  # --mount=type=cache,target=./target \
-  --mount=type=cache,target=/var/cache/cargo \
-  --mount=type=cache,target=/var/cache/sccache \
-  cargo build --offline --release -p server
+  cargo build --offline --release
 
 FROM debian:bookworm-slim
 
@@ -64,13 +35,9 @@ RUN \
   apt-get update && apt-get install -y \
   ca-certificates openssl
 
-COPY --from=builder /app/server/litestream /app/litestream
-COPY --from=builder /app/server/key.json /app/key.json
-COPY --from=builder /app/server/litestream.yml /app/litestream.yml
-COPY --from=builder /app/server/cli/run.bash /app/run.bash
-COPY --from=builder /app/server/.env /app/.env
+COPY --from=builder /app/.env /app/.env
 COPY --from=builder /app/target/release/server /app/server
-COPY --from=builder /app/browser/dist /app/dist
+COPY --from=builder /app/dist /app/dist
 
 EXPOSE 8080
-CMD ["/app/run.bash"]
+CMD ["/app/server"]
