@@ -1,0 +1,521 @@
+
+<script>
+    "use strict";
+
+    // for debug
+    window.onerror = (message, source, lineno, colno, error) => {
+        consolelog(message, source, lineno, colno, error);
+        console.error(error);
+    };
+    // for debug
+    window.addEventListener("unhandledrejection", (ev) => {
+        consolelog("Unhandledrejection", ev.reason.code, ev.reason.name, ev.reason.message, ev.reason.stack);
+        console.error(ev);
+    });
+
+    // for debug
+    function addEventListeners(peer) {
+        peer.addEventListener("connectionstatechange", (_ev) => {
+            consolelog("onconnectionstatechange", peer.connectionState);
+        });
+        peer.addEventListener("datachannel", (ev) => {
+            const {
+                binaryType,
+                bufferedAmount,
+                id,
+                label,
+                maxPacketLifeTime,
+                maxRetransmits,
+                negotiated,
+                ordered,
+                protocol,
+                readyState,
+            } = ev.channel;
+            consolelog("ondatachannel", JSON.stringify({
+                binaryType,
+                bufferedAmount,
+                id,
+                label,
+                maxPacketLifeTime,
+                maxRetransmits,
+                negotiated,
+                ordered,
+                protocol,
+                readyState,
+            }, null, 2));
+            ev.channel.addEventListener("bufferedamountlow", (_ev) => {
+                consolelog("onbufferedamountlow", id, label);
+            });
+            ev.channel.addEventListener("close", (_ev) => {
+                consolelog("onclose", id, label);
+            });
+            ev.channel.addEventListener("closing", (_ev) => {
+                consolelog("onclosing", id, label);
+            });
+            ev.channel.addEventListener("error", (ev) => {
+                const err = ev.error;
+                consolelog("onerror",
+                    err.message,
+                    err.sdpLineNumber,
+                    err.httpRequestStatusCode,
+                    err.sctpCauseCode,
+                    err.receivedAlert,
+                    err.sentAlert,
+                    err.errorDetail,
+                    "    Error in file ",
+                    err.filename,
+                    " at line ",
+                    err.lineNumber,
+                    ", column ",
+                    err.columnNumber,
+                );
+                console.error("onerror", id, label, err);
+            });
+            // ev.channel.addEventListener("message", (ev) => {
+            //     consolelog("onmessage", id, label, ev, ev.data);
+            // });
+            ev.channel.addEventListener("open", (_ev) => {
+                consolelog("onopen", id, label);
+            });
+
+        });
+        peer.addEventListener("icecandidate", (ev) => {
+            consolelog("onicecandidate", JSON.stringify(ev.candidate, null, 2));
+        });
+        peer.addEventListener("icecandidateerror", (ev) => {
+            consolelog("onicecandidateerror", JSON.stringify(ev, null, 2));
+            console.error("onicecandidateerror", ev);
+        });
+        peer.addEventListener("iceconnectionstatechange", (_ev) => {
+            consolelog("oniceconnectionstatechange", peer.iceConnectionState);
+        });
+        peer.addEventListener("icegatheringstatechange", (_ev) => {
+            consolelog("onicegatheringstatechange", peer.iceGatheringState);
+        });
+        peer.addEventListener("negotiationneeded", (_ev) => {
+            consolelog("onnegotiationneeded");
+        });
+        peer.addEventListener("signalingstatechange", (_ev) => {
+            consolelog("onsignalingstatechange", peer.signalingState);
+        });
+        peer.addEventListener("track", async (ev) => {
+            consolelog("ontrack", JSON.stringify(ev, null, 2));
+        });
+    }
+
+    async function captureVideo() {
+        const button1 = document.createElement("button");
+        const button2 = document.createElement("button");
+        button1.appendChild(document.createTextNode("captureCamera"));
+        button2.appendChild(document.createTextNode("captureDesktop"));
+        document.body.appendChild(button1);
+        document.body.appendChild(button2);
+        const target = await new Promise((resolve) => {
+            button1.onclick = () => resolve("camera");
+            button2.onclick = () => resolve("desktop");
+        });
+
+        // waiting for user selection
+
+        document.body.removeChild(button1);
+        document.body.removeChild(button2);
+        consolelog("target", target);
+        consolelog("make Offer");
+        const peer = new RTCPeerConnection({
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' }
+            ]
+        });
+        addEventListeners(peer);
+        consolelog("Adding local stream...");
+        const localStream = await (
+            target === "camera" ? navigator.mediaDevices.getUserMedia({ video: { frameRate: 15 } }) :
+                target === "desktop" ? navigator.mediaDevices.getDisplayMedia({
+                    video: {
+                        frameRate: 15,
+                        displaySurface: "monitor",
+                    },
+                }) :
+                    Promise.reject(new Error("unknown target"))
+        );
+        peer.addStream(localStream);
+        await new Promise((resolve) => {
+            peer.onnegotiationneeded = () => resolve();
+        });
+        const choosableCodecs = RTCRtpSender.getCapabilities("video").codecs
+            .filter((codec) => codec.mimeType !== "video/red" && codec.mimeType !== "video/rtx" && codec.mimeType !== "video/ulpfec");
+        consolelog("choosableCodecs", JSON.stringify(choosableCodecs, null, 2));
+        if (RTCRtpTransceiver.prototype.setCodecPreferences instanceof Function) {
+            // filter firefox
+            const ul = document.createElement("ul");
+            for (const [i, codec] of choosableCodecs.entries()) {
+                const li = document.createElement("li");
+                const input = document.createElement("input");
+                input.type = "checkbox";
+                input.id = `codec-${i}`;
+                const label = document.createElement("label");
+                label.htmlFor = `codec-${i}`;
+                label.appendChild(document.createTextNode(JSON.stringify(codec)));
+                li.appendChild(input);
+                li.appendChild(label);
+                ul.appendChild(li);
+            }
+            document.body.appendChild(ul);
+            const codecButton = document.createElement("button");
+            codecButton.appendChild(document.createTextNode("choose codecs"));
+            document.body.appendChild(codecButton);
+            await new Promise((resolve) => { codecButton.onclick = resolve; });
+
+            // waiting for user selection
+
+            const codecPreferences = choosableCodecs.filter((_, i) => document.getElementById(`codec-${i}`).checked);
+            document.body.removeChild(ul);
+            document.body.removeChild(codecButton);
+            consolelog("codecPreferences", JSON.stringify(codecPreferences, null, 2));
+            const transceivers = peer.getTransceivers();
+            if (transceivers[0].sender.track.kind !== "video") {
+                throw new Error("Video track is not found.");
+            }
+            transceivers[0].setCodecPreferences(codecPreferences);
+        }
+        consolelog("createOffer()");
+        const localDescription = await peer.createOffer();
+        consolelog("createOffer() succsess in promise");
+        await peer.setLocalDescription(localDescription);
+        consolelog("setLocalDescription() succsess in promise");
+        await Promise.all([
+            new Promise((resolve) => {
+                peer.onicegatheringstatechange = (ev) => {
+                    if (peer.iceGatheringState === "complete") {
+                        resolve();
+                    }
+                };
+            }),
+            new Promise((resolve) => {
+                peer.onicecandidate = (ev) => {
+                    if (ev.candidate != null) {
+                        // Trickle ICE の場合は、ICE candidateを相手に送る
+                        // Vanilla ICE の場合には、何もしない
+                    } else {
+                        // Trickle ICE の場合は、何もしない
+                        // Vanilla ICE の場合には、ICE candidateを含んだSDPを相手に送る
+                        resolve();
+                    }
+                };
+            })
+        ]);
+        const localSdpText = peer.localDescription.sdp
+        consolelog("---sending sdp ---");
+        consolelog(localSdpText);
+        consolelog("encoding sdp to base64 and zipping...");
+        const zippedBase64URI = await encodeZippedBase64URI(localSdpText);
+        consolelog(zippedBase64URI);
+        let url = encodeHashQueryURL({ zip: zippedBase64URI });
+        try {
+            url = await shortenURL(url);
+        } catch (err) {
+            consolelog(err);
+        }
+        consolelog("waiting peer action", url);
+        const a = document.createElement("a");
+        a.href = url;
+        a.target = "_blank";
+        a.style = "display: block;";
+        a.onclick = (e) => e.preventDefault();
+        a.appendChild(document.createTextNode("copy this link to share"));
+        document.body.appendChild(a);
+        const input = document.createElement("input");
+        input.placeholder = "paste remote peer url here";
+        input.type = "url";
+        if (navigator.clipboard != null && navigator.clipboard.readText instanceof Function) {
+            input.onclick = async () => {
+                input.value = await navigator.clipboard.readText();
+                input.focus();
+                input.select();
+            };
+        }
+        document.body.appendChild(input);
+        const button = document.createElement("button");
+        button.appendChild(document.createTextNode("Receive Offer"));
+        document.body.appendChild(button);
+        await new Promise((resolve) => { button.onclick = resolve; });
+
+        // waiting for signalling
+
+        let url2 = input.value;
+        try {
+            url2 = await expandURL(url2);
+        } catch (err) {
+            consolelog(err);
+        }
+        const { zip: remoteZippedBase64URI2 } = decodeHashQueryURL(url2);
+        consolelog(remoteZippedBase64URI2);
+        const remoteSdpText = await decodeZippedBase64URI(remoteZippedBase64URI2);
+        consolelog("Received answer text...");
+        consolelog(remoteSdpText);
+        document.body.removeChild(a);
+        document.body.removeChild(button);
+        document.body.removeChild(input);
+        const answerSdp = new RTCSessionDescription({
+            type: "answer",
+            sdp: remoteSdpText,
+        });
+        await peer.setRemoteDescription(answerSdp);
+        consolelog("setRemoteDescription(answer) succsess in promise");
+        await new Promise((resolve) => {
+            peer.onconnectionstatechange = () => {
+                if (peer.connectionState === "disconnected") {
+                    resolve();
+                }
+            };
+        });
+        consolelog("Hang up.");
+        peer.close();
+    }
+
+    async function receiveRtc(remoteSdpText) {
+        // for debuging
+        const recvCodecs = RTCRtpReceiver.getCapabilities("video").codecs;
+        consolelog("recvCodecs", JSON.stringify(recvCodecs, null, 2));
+        consolelog("Received offer text...");
+        consolelog(remoteSdpText);
+        const offerSdp = new RTCSessionDescription({
+            type: "offer",
+            sdp: remoteSdpText,
+        });
+        const peer = new RTCPeerConnection({ iceServers: [] });
+        addEventListeners(peer);
+        const video = document.createElement("video");
+        peer.ontrack = (ev) => {
+            const remoteStream = ev.streams[0];
+            video.muted = true;
+            video.volume = 0;
+            video.autoplay = true;
+            video.playsinline = true;
+            video.controls = false;
+            video.srcObject = remoteStream;
+        };
+        await peer.setRemoteDescription(offerSdp);
+        consolelog("setRemoteDescription(offer) succsess in promise");
+        consolelog("sending Answer. Creating remote session description...");
+        const localDescription = await peer.createAnswer();
+        consolelog("createAnswer() succsess in promise");
+        await peer.setLocalDescription(localDescription);
+        consolelog("setLocalDescription() succsess in promise");
+        // -- Trickle ICE の場合は、初期SDPを相手に送る -- 
+        // -- Vanilla ICE の場合には、まだSDPは送らない --
+        //sendSdp(peerConnection.localDescription);
+        await new Promise((resolve) => {
+            peer.onicecandidate = (ev) => {
+                if (ev.candidate != null) {
+                    // Trickle ICE の場合は、ICE candidateを相手に送る
+                    // Vanilla ICE の場合には、何もしない
+                } else {
+                    // Trickle ICE の場合は、何もしない
+                    // Vanilla ICE の場合には、ICE candidateを含んだSDPを相手に送る
+                    resolve();
+                }
+            };
+        });
+        const localSdpText = peer.localDescription.sdp;
+        consolelog("---sending sdp ---");
+        consolelog(localSdpText);
+        consolelog("encoding sdp to base64 and zipping...");
+        const zippedBase64URI = await encodeZippedBase64URI(localSdpText);
+        consolelog(zippedBase64URI);
+        let url = encodeHashQueryURL({ zip: zippedBase64URI });
+        try {
+            url = await shortenURL(url);
+        } catch (err) {
+            consolelog(err);
+        }
+        consolelog("waiting peer action", url);
+        const a = document.createElement("a");
+        a.href = url;
+        a.target = "_blank";
+        a.onclick = (e) => e.preventDefault();
+        a.appendChild(document.createTextNode("copy this link to share"));
+        document.body.appendChild(a);
+
+        // waiting for signalling
+
+        await new Promise((resolve) => {
+            peer.onconnectionstatechange = () => {
+                if (peer.connectionState === "connected") {
+                    resolve();
+                }
+            };
+        });
+        document.body.removeChild(a);
+        document.body.appendChild(video);
+        video.play();
+        await new Promise((resolve) => {
+            peer.onconnectionstatechange = () => {
+                if (peer.connectionState === "disconnected") {
+                    resolve();
+                }
+            };
+        });
+        consolelog("Hang up.");
+        peer.close();
+        video.pause();
+        video.srcObject = null;
+        document.body.removeChild(video);
+    }
+
+    const logarea = document.createElement("textarea");
+    logarea.style = "display: block; width: 100%; height: 200px;";
+    logarea.readonly = true;
+    function consolelog(...args) {
+        console.log(...args);
+        logarea.appendChild(document.createTextNode(args.join(" ") + "\n"));
+    }
+    document.addEventListener("DOMContentLoaded", async (ev) => {
+        document.body.appendChild(logarea);
+        const a = document.createElement("a");
+        a.href = location.protocol + '//' + location.hostname + (location.port ? ":" + location.port : "") + location.pathname;
+        a.style = "display: block;";
+        a.appendChild(document.createTextNode("reset"));
+        document.body.appendChild(a);
+        let zippedBase64URI;
+        try {
+            const { zip } = decodeHashQueryURL(location.href);
+            zippedBase64URI = zip;
+        } catch {
+            return captureVideo()
+        }
+        const sdp = await decodeZippedBase64URI(zippedBase64URI);
+        return receiveRtc(sdp);
+    });
+
+    function encodeHashQueryURL(dic) {
+        // hash にするとサーバに送信されない
+        const url = location.protocol + '//' + location.hostname + (location.port ? ":" + location.port : "") + location.pathname + "#" + encodeURIQuery(dic);
+        return url;
+    }
+
+    function decodeHashQueryURL(url) {
+        // hash にするとサーバに送信されない
+        const hash = new URL(url).hash.split("#")[1];
+        const obj = decodeURIQuery(hash);
+        return obj;
+    }
+
+    async function encodeZippedBase64URI(text) {
+        const textBlob = convertTextToBlob(text);
+        const zippedBlob = await zip(textBlob);
+        const zippedBase64URI = await encodeBlobToBase64DataURI(zippedBlob);
+        return zippedBase64URI;
+    }
+
+    async function decodeZippedBase64URI(zippedBase64URI) {
+        const zippedBlob = await decodeBase64DataURI(zippedBase64URI);
+        const textBlob = await unzip(zippedBlob);
+        const text = await readBlobAsText(textBlob);
+        return text;
+    }
+
+    function convertTextToBlob(text, type) {
+        return new Blob([text], { type: "text/plain" });
+    }
+
+    async function readBlobAsText(blob) {
+        const reader = new FileReader();
+        reader.readAsText(blob);
+        await new Promise((resolve, reject) => {
+            reader.onloadend = resolve;
+            reader.onerror = reject;
+        });
+        return reader.result;
+    }
+
+    async function encodeBlobToBase64DataURI(blob) {
+        const reader = new FileReader();
+        reader.readAsDataURL(blob);
+        await new Promise((resolve, reject) => {
+            reader.onloadend = resolve;
+            reader.onerror = reject;
+        });
+        return reader.result.replace(";base64,", ";charset=utf-8;base64,");
+    }
+
+    async function decodeBase64DataURI(dataURI) {
+        const tmp = dataURI.split(',');
+        const mimeString = tmp[0].split(':')[1].split(';')[0];
+        const byteString = atob(tmp[1]);
+        const ab = new ArrayBuffer(byteString.length);
+        const ia = new Uint8Array(ab);
+        let i, j, ref;
+        for (i = j = 0, ref = byteString.length; (0 <= ref ? j <= ref : j >= ref); i = 0 <= ref ? ++j : --j) {
+            ia[i] = byteString.charCodeAt(i);
+        }
+        return new Blob([ab], {
+            type: mimeString
+        });
+    }
+
+    async function zip(blob) {
+        const cs = new CompressionStream("deflate");
+        const strm = blob.stream().pipeThrough(cs);
+        return await new Response(strm).blob();
+    }
+
+    async function unzip(blob) {
+        const ds = new DecompressionStream("deflate");
+        const strm = blob.stream().pipeThrough(ds);
+        return await new Response(strm).blob();
+    }
+
+    function encodeURIQuery(dic) {
+        const results = [];
+        for (const [key, val] of Object.entries(dic)) {
+            results.push(key + "=" + encodeURIComponent(val));
+        }
+        return results.join("&");
+    }
+
+    function decodeURIQuery(query) {
+        const dic = {};
+        const results = query.split("&");
+        for (const ret of results) {
+            const [key, ...val] = ret.split("=");
+            dic[key] = decodeURIComponent(val.join("="));
+        }
+        return dic;
+    }
+
+    async function shortenURL(url) {
+        const query = "long=" + encodeURIComponent(url);
+        const res = await fetch("https://csclub.uwaterloo.ca/~phthakka/1pt-express/addURL?" + query, {
+            method: "POST",
+            mode: "cors",
+            headers: { 'Accept': 'application/json' }
+        });
+        if (!(res.status === 200 || res.status === 201)) {
+            console.error(res);
+            throw new Error(res.status);
+        }
+        const { short } = await res.json();
+        return "https://1pt.co/" + short;
+    }
+
+    async function expandURL(url) {
+        const urlObj = new URL(url);
+        const query = "url=" + decodeURIComponent(urlObj.pathname.split("/").join(""));
+        const res = await fetch("https://csclub.uwaterloo.ca/~phthakka/1pt-express/getURL?" + query, {
+            method: "GET",
+            mode: "cors",
+            headers: { 'Accept': 'application/json' },
+            redirect: "follow",
+        });
+        if (!(res.status === 200 || res.status === 201 || res.status === 301)) {
+            console.error(res);
+            throw new Error(res.status);
+        }
+        const { url: longUrl } = await res.json();
+        return longUrl;
+    }
+</script>
+
+<body>
+</body>

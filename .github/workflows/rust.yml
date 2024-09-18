@@ -1,0 +1,51 @@
+name: Rust
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  fmt:
+    runs-on: ubuntu-22.04
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        components: rustfmt
+    - uses: Swatinem/rust-cache@v2
+    - run: cargo install cargo-tomlfmt
+    - run: cargo fmt --all -- --check
+    - run: find . -name Cargo.toml -execdir cargo tomlfmt -d \;
+
+  clippy:
+    runs-on: ubuntu-22.04
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        components: clippy
+    - uses: Swatinem/rust-cache@v2
+    - run: sudo apt-get update && sudo apt-get install -y libudev-dev
+    - run: cargo clippy --all-targets --all-features -- -Dwarnings
+
+  test:
+    runs-on: ubuntu-22.04
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@stable
+    - uses: Swatinem/rust-cache@v2
+    - run: sudo apt-get update && sudo apt-get install -y libudev-dev
+    - run: cargo test
+
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@stable
+    - uses: Swatinem/rust-cache@v2
+    - run: sudo apt-get update && sudo apt-get install -y libudev-dev
+    - run: cargo install cross --git https://github.com/cross-rs/cross
+    - run: CROSS_NO_WARNINGS=0 make all
+
