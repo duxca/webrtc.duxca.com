@@ -1,6 +1,4 @@
-// mod api;
 mod auth;
-// mod db;
 mod web;
 
 #[derive(serde::Deserialize, Debug)]
@@ -30,10 +28,26 @@ async fn main() -> Result<(), anyhow::Error> {
     let config = envy::from_env::<Config>()?;
     log::debug!("config: {:#?}", config);
 
-    // ここで remote db に対して migrate する
-    // sqlx::migrate!().run(&pool).await?;
-
     let session_store = tower_sessions::MemoryStore::default();
+
+    // let governor_conf = tower_governor::governor::GovernorConfigBuilder::default()
+    //     .per_second(2)
+    //     .burst_size(5)
+    //     .use_headers()
+    //     .finish()
+    //     .unwrap();
+    // let governor_conf = std::sync::Arc::new(governor_conf);
+
+    // tokio::spawn({
+    //     let governor_limiter = governor_conf.limiter().clone();
+    //     async move {
+    //         loop {
+    //             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    //             tracing::info!("rate limiting storage size: {}", governor_limiter.len());
+    //             governor_limiter.retain_recent();
+    //         }
+    //     }
+    // });
 
     // cookie のセッションの設定
     let mut session_layer = tower_sessions::SessionManagerLayer::new(session_store)
@@ -41,7 +55,7 @@ async fn main() -> Result<(), anyhow::Error> {
         //.with_same_site(tower_sessions::cookie::SameSite::Lax)
         .with_same_site(tower_sessions::cookie::SameSite::Strict)
         .with_expiry(tower_sessions::Expiry::OnInactivity(
-            std::time::Duration::from_secs(600).try_into()?,
+            std::time::Duration::from_secs(60 * 60 * 24).try_into()?,
         ));
     if cfg!(not(feature = "local")) {
         // 本番環境で有効にする
@@ -82,6 +96,9 @@ async fn main() -> Result<(), anyhow::Error> {
                                                             // .allow_methods(tower_http::cors::Any)
                                                             // .allow_origin(tower_http::cors::Any),
         )
+        // .layer(tower_governor::GovernorLayer {
+        //     config: governor_conf,
+        // })
         .nest_service("/", tower_http::services::ServeDir::new("dist"))
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .layer(tower_http::compression::CompressionLayer::new())
