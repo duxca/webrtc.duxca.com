@@ -29,11 +29,13 @@ FROM debian:bookworm-slim
 
 WORKDIR /app
 
-RUN \
-  --mount=type=cache,target=/var/lib/apt,sharing=locked \
-  --mount=type=cache,target=/var/cache/apt,sharing=locked \
-  apt-get update && apt-get install -y \
-  ca-certificates openssl
+# RUN \
+#   --mount=type=cache,target=/var/lib/apt,sharing=locked \
+#   --mount=type=cache,target=/var/cache/apt,sharing=locked \
+#   apt-get update && apt-get install -y \
+#   ca-certificates openssl \
+#   && apt-get clean \
+#   && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/.env /app/.env
 COPY --from=builder /app/target/release/server /app/server
