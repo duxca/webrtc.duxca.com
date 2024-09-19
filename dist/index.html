@@ -1,6 +1,19 @@
-
 <script>
     "use strict";
+
+    // entry point
+    document.addEventListener("DOMContentLoaded", async (ev) => {
+        main();
+    });
+
+    // for debug
+    const logarea = document.createElement("textarea");
+    logarea.style = "display: block; width: 100%; height: 200px;";
+    logarea.readonly = true;
+    function consolelog(...args) {
+        console.log(...args);
+        logarea.appendChild(document.createTextNode(args.join(" ") + "\n"));
+    }
 
     // for debug
     window.onerror = (message, source, lineno, colno, error) => {
@@ -103,7 +116,47 @@
         });
     }
 
-    async function captureVideo() {
+    async function main() {
+        let userId = await getMe();
+        if (userId == null) {
+            const form = document.createElement("form");
+            form.method = "POST";
+            form.action = "/login";
+            const button = document.createElement("input");
+            button.type = "submit";
+            button.value = "login";
+            form.appendChild(button);
+            document.body.appendChild(form);
+            return;
+        }
+        document.body.appendChild(logarea);
+        const form = document.createElement("form");
+        form.method = "POST";
+        form.action = "/logout";
+        const button = document.createElement("input");
+        button.type = "submit";
+        button.value = "logout";
+        form.appendChild(button);
+        document.body.appendChild(form);
+
+        const resetButton = document.createElement("button");
+        resetButton.appendChild(document.createTextNode("reset"));
+        document.body.appendChild(resetButton);
+        resetButton.addEventListener("click", async (ev) => {
+            await deleteValue(`sdp-req-${userId}`);
+            await deleteValue(`sdp-res-${userId}`);
+            location.reload();
+        });
+
+        const remoteSdpText = await getValue(`sdp-req-${userId}`);
+        if (remoteSdpText == null) {
+            return captureVideo(userId);
+        } else {
+            return receiveRtc(userId, remoteSdpText);
+        }
+    }
+
+    async function captureVideo(userId) {
         const button1 = document.createElement("button");
         const button2 = document.createElement("button");
         button1.appendChild(document.createTextNode("captureCamera"));
@@ -207,55 +260,21 @@
         const localSdpText = peer.localDescription.sdp
         consolelog("---sending sdp ---");
         consolelog(localSdpText);
-        consolelog("encoding sdp to base64 and zipping...");
-        const zippedBase64URI = await encodeZippedBase64URI(localSdpText);
-        consolelog(zippedBase64URI);
-        let url = encodeHashQueryURL({ zip: zippedBase64URI });
-        try {
-            url = await shortenURL(url);
-        } catch (err) {
-            consolelog(err);
-        }
-        consolelog("waiting peer action", url);
-        const a = document.createElement("a");
-        a.href = url;
-        a.target = "_blank";
-        a.style = "display: block;";
-        a.onclick = (e) => e.preventDefault();
-        a.appendChild(document.createTextNode("copy this link to share"));
-        document.body.appendChild(a);
-        const input = document.createElement("input");
-        input.placeholder = "paste remote peer url here";
-        input.type = "url";
-        if (navigator.clipboard != null && navigator.clipboard.readText instanceof Function) {
-            input.onclick = async () => {
-                input.value = await navigator.clipboard.readText();
-                input.focus();
-                input.select();
-            };
-        }
-        document.body.appendChild(input);
-        const button = document.createElement("button");
-        button.appendChild(document.createTextNode("Receive Offer"));
-        document.body.appendChild(button);
-        await new Promise((resolve) => { button.onclick = resolve; });
+        await setValue(`sdp-req-${userId}`, localSdpText);
 
         // waiting for signalling
-
-        let url2 = input.value;
-        try {
-            url2 = await expandURL(url2);
-        } catch (err) {
-            consolelog(err);
+        let remoteSdpText = null;
+        while (true) {
+            remoteSdpText = await getValue(`sdp-res-${userId}`);
+            if (remoteSdpText != null) {
+                break;
+            }
+            await new Promise((resolve) => {
+                setTimeout(resolve, 3000);
+            });
         }
-        const { zip: remoteZippedBase64URI2 } = decodeHashQueryURL(url2);
-        consolelog(remoteZippedBase64URI2);
-        const remoteSdpText = await decodeZippedBase64URI(remoteZippedBase64URI2);
         consolelog("Received answer text...");
         consolelog(remoteSdpText);
-        document.body.removeChild(a);
-        document.body.removeChild(button);
-        document.body.removeChild(input);
         const answerSdp = new RTCSessionDescription({
             type: "answer",
             sdp: remoteSdpText,
@@ -273,7 +292,7 @@
         peer.close();
     }
 
-    async function receiveRtc(remoteSdpText) {
+    async function receiveRtc(userId, remoteSdpText) {
         // for debuging
         const recvCodecs = RTCRtpReceiver.getCapabilities("video").codecs;
         consolelog("recvCodecs", JSON.stringify(recvCodecs, null, 2));
@@ -320,22 +339,7 @@
         const localSdpText = peer.localDescription.sdp;
         consolelog("---sending sdp ---");
         consolelog(localSdpText);
-        consolelog("encoding sdp to base64 and zipping...");
-        const zippedBase64URI = await encodeZippedBase64URI(localSdpText);
-        consolelog(zippedBase64URI);
-        let url = encodeHashQueryURL({ zip: zippedBase64URI });
-        try {
-            url = await shortenURL(url);
-        } catch (err) {
-            consolelog(err);
-        }
-        consolelog("waiting peer action", url);
-        const a = document.createElement("a");
-        a.href = url;
-        a.target = "_blank";
-        a.onclick = (e) => e.preventDefault();
-        a.appendChild(document.createTextNode("copy this link to share"));
-        document.body.appendChild(a);
+        await setValue(`sdp-res-${userId}`, localSdpText);
 
         // waiting for signalling
 
@@ -346,7 +350,7 @@
                 }
             };
         });
-        document.body.removeChild(a);
+        video.style = "display: block; width: 100%; height: auto; position: absolute; top: 0px; left: 0px;";
         document.body.appendChild(video);
         video.play();
         await new Promise((resolve) => {
@@ -363,157 +367,87 @@
         document.body.removeChild(video);
     }
 
-    const logarea = document.createElement("textarea");
-    logarea.style = "display: block; width: 100%; height: 200px;";
-    logarea.readonly = true;
-    function consolelog(...args) {
-        console.log(...args);
-        logarea.appendChild(document.createTextNode(args.join(" ") + "\n"));
-    }
-    document.addEventListener("DOMContentLoaded", async (ev) => {
-        document.body.appendChild(logarea);
-        const a = document.createElement("a");
-        a.href = location.protocol + '//' + location.hostname + (location.port ? ":" + location.port : "") + location.pathname;
-        a.style = "display: block;";
-        a.appendChild(document.createTextNode("reset"));
-        document.body.appendChild(a);
-        let zippedBase64URI;
-        try {
-            const { zip } = decodeHashQueryURL(location.href);
-            zippedBase64URI = zip;
-        } catch {
-            return captureVideo()
-        }
-        const sdp = await decodeZippedBase64URI(zippedBase64URI);
-        return receiveRtc(sdp);
-    });
-
-    function encodeHashQueryURL(dic) {
-        // hash にするとサーバに送信されない
-        const url = location.protocol + '//' + location.hostname + (location.port ? ":" + location.port : "") + location.pathname + "#" + encodeURIQuery(dic);
-        return url;
-    }
-
-    function decodeHashQueryURL(url) {
-        // hash にするとサーバに送信されない
-        const hash = new URL(url).hash.split("#")[1];
-        const obj = decodeURIQuery(hash);
-        return obj;
-    }
-
-    async function encodeZippedBase64URI(text) {
-        const textBlob = convertTextToBlob(text);
-        const zippedBlob = await zip(textBlob);
-        const zippedBase64URI = await encodeBlobToBase64DataURI(zippedBlob);
-        return zippedBase64URI;
-    }
-
-    async function decodeZippedBase64URI(zippedBase64URI) {
-        const zippedBlob = await decodeBase64DataURI(zippedBase64URI);
-        const textBlob = await unzip(zippedBlob);
-        const text = await readBlobAsText(textBlob);
-        return text;
-    }
-
-    function convertTextToBlob(text, type) {
-        return new Blob([text], { type: "text/plain" });
-    }
-
-    async function readBlobAsText(blob) {
-        const reader = new FileReader();
-        reader.readAsText(blob);
-        await new Promise((resolve, reject) => {
-            reader.onloadend = resolve;
-            reader.onerror = reject;
-        });
-        return reader.result;
-    }
-
-    async function encodeBlobToBase64DataURI(blob) {
-        const reader = new FileReader();
-        reader.readAsDataURL(blob);
-        await new Promise((resolve, reject) => {
-            reader.onloadend = resolve;
-            reader.onerror = reject;
-        });
-        return reader.result.replace(";base64,", ";charset=utf-8;base64,");
-    }
-
-    async function decodeBase64DataURI(dataURI) {
-        const tmp = dataURI.split(',');
-        const mimeString = tmp[0].split(':')[1].split(';')[0];
-        const byteString = atob(tmp[1]);
-        const ab = new ArrayBuffer(byteString.length);
-        const ia = new Uint8Array(ab);
-        let i, j, ref;
-        for (i = j = 0, ref = byteString.length; (0 <= ref ? j <= ref : j >= ref); i = 0 <= ref ? ++j : --j) {
-            ia[i] = byteString.charCodeAt(i);
-        }
-        return new Blob([ab], {
-            type: mimeString
-        });
-    }
-
-    async function zip(blob) {
-        const cs = new CompressionStream("deflate");
-        const strm = blob.stream().pipeThrough(cs);
-        return await new Response(strm).blob();
-    }
-
-    async function unzip(blob) {
-        const ds = new DecompressionStream("deflate");
-        const strm = blob.stream().pipeThrough(ds);
-        return await new Response(strm).blob();
-    }
-
-    function encodeURIQuery(dic) {
-        const results = [];
-        for (const [key, val] of Object.entries(dic)) {
-            results.push(key + "=" + encodeURIComponent(val));
-        }
-        return results.join("&");
-    }
-
-    function decodeURIQuery(query) {
-        const dic = {};
-        const results = query.split("&");
-        for (const ret of results) {
-            const [key, ...val] = ret.split("=");
-            dic[key] = decodeURIComponent(val.join("="));
-        }
-        return dic;
-    }
-
-    async function shortenURL(url) {
-        const query = "long=" + encodeURIComponent(url);
-        const res = await fetch("https://csclub.uwaterloo.ca/~phthakka/1pt-express/addURL?" + query, {
+    async function getMe() {
+        const res = await fetch("/api", {
+            mode: "cors",
             method: "POST",
-            mode: "cors",
-            headers: { 'Accept': 'application/json' }
+            credentials: "include",
+            headers: {
+                'Accept': 'application/json',
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                type: "GetMe",
+            })
         });
-        if (!(res.status === 200 || res.status === 201)) {
+        if (res.status === 401) {
             console.error(res);
-            throw new Error(res.status);
+            return null;
         }
-        const { short } = await res.json();
-        return "https://1pt.co/" + short;
+        if (res.status === 200) {
+            const body = await res.json()
+            return body.userId;
+        }
+        throw new Error(res.status);
     }
-
-    async function expandURL(url) {
-        const urlObj = new URL(url);
-        const query = "url=" + decodeURIComponent(urlObj.pathname.split("/").join(""));
-        const res = await fetch("https://csclub.uwaterloo.ca/~phthakka/1pt-express/getURL?" + query, {
-            method: "GET",
+    async function setValue(key, value) {
+        const res = await fetch("/api", {
             mode: "cors",
-            headers: { 'Accept': 'application/json' },
-            redirect: "follow",
+            method: "POST",
+            credentials: "include",
+            headers: {
+                'Accept': 'application/json',
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                type: "SetValue",
+                key,
+                value,
+            })
         });
-        if (!(res.status === 200 || res.status === 201 || res.status === 301)) {
-            console.error(res);
-            throw new Error(res.status);
+        if (res.status === 200) {
+            return {};
         }
-        const { url: longUrl } = await res.json();
-        return longUrl;
+        throw new Error(res.status);
+    }
+    async function getValue(key) {
+        const res = await fetch("/api", {
+            mode: "cors",
+            method: "POST",
+            credentials: "include",
+            headers: {
+                'Accept': 'application/json',
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                type: "GetValue",
+                key,
+            })
+        });
+        if (res.status === 200) {
+            const body = await res.json()
+            return body.value;
+        }
+        throw new Error(res.status);
+    }
+    async function deleteValue(key) {
+        const res = await fetch("/api", {
+            mode: "cors",
+            method: "POST",
+            credentials: "include",
+            headers: {
+                'Accept': 'application/json',
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                type: "DeleteValue",
+                key,
+            })
+        });
+        if (res.status === 200) {
+            return {};
+        }
+        throw new Error(res.status);
     }
 </script>
 

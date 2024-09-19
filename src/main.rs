@@ -64,9 +64,11 @@ async fn main() -> Result<(), anyhow::Error> {
             config.redirect_url,
         )
     };
+    let state = web::State::default();
     let backend = crate::auth::Backend::new(client_token, redirect_url);
 
     let app = axum::Router::new()
+        .route("/api", axum::routing::post(crate::web::api))
         .route(
             "/version",
             axum::routing::get(|| async { build::CLAP_LONG_VERSION }),
@@ -82,7 +84,8 @@ async fn main() -> Result<(), anyhow::Error> {
         )
         .nest_service("/", tower_http::services::ServeDir::new("dist"))
         .layer(tower_http::trace::TraceLayer::new_for_http())
-        .layer(tower_http::compression::CompressionLayer::new());
+        .layer(tower_http::compression::CompressionLayer::new())
+        .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(config.host_addr).await?;
 
