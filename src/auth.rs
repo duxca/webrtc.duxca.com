@@ -1,3 +1,79 @@
+pub const CSRF_STATE_KEY: &str = "oauth.csrf-state";
+
+/// POST /login
+#[tracing::instrument(level = "trace")]
+pub async fn login(
+    auth_session: axum_login::AuthSession<crate::auth::Backend>,
+    session: tower_sessions::Session,
+    axum::Form(()): axum::Form<()>,
+) -> Result<impl axum::response::IntoResponse, crate::web::Ise> {
+    use axum::response::IntoResponse;
+    let auth_url = oauth2::AuthUrl::new(AUTH_URL.to_string()).unwrap();
+    let token_url = oauth2::TokenUrl::new(TOKEN_URL.to_string()).unwrap();
+    let client_id = auth_session.backend.github_client_id.clone();
+    let client_secret = auth_session.backend.github_client_secret.clone();
+    let redirect_url = auth_session.backend.redirect_url.clone();
+    let client = oauth2::basic::BasicClient::new(client_id)
+        .set_client_secret(client_secret)
+        .set_auth_uri(auth_url)
+        .set_token_uri(token_url)
+        .set_redirect_uri(redirect_url);
+    let (auth_url, csrf_state) = client.authorize_url(oauth2::CsrfToken::new_random).url();
+    session.insert(CSRF_STATE_KEY, csrf_state.secret()).await?;
+    Ok(axum::response::Redirect::to(auth_url.as_str()).into_response())
+}
+
+// OAuth2 の認可コードを受け取るためのクエリパラメータ
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct AuthzRequestQuery {
+    pub code: String,
+    pub state: oauth2::CsrfToken,
+}
+
+/// GET /oauth/callback
+#[tracing::instrument(level = "trace")]
+pub async fn callback(
+    mut auth_session: axum_login::AuthSession<crate::auth::Backend>,
+    session: tower_sessions::Session,
+    axum::extract::Query(AuthzRequestQuery {
+        code,
+        state: new_state,
+    }): axum::extract::Query<AuthzRequestQuery>,
+) -> Result<impl axum::response::IntoResponse, crate::web::Ise> {
+    use axum::response::IntoResponse;
+    // セッションがない場合はエラー
+    let Some(old_state) = session.get(CSRF_STATE_KEY).await? else {
+        return Ok((axum::http::StatusCode::BAD_REQUEST, "session expired").into_response());
+    };
+    let creds = crate::auth::Credentials {
+        code,
+        old_state,
+        new_state,
+        // ログイン済みかどうか
+        user: auth_session.user.clone(),
+    };
+    let Some(user) = auth_session.authenticate(creds.clone()).await? else {
+        return Ok((
+            axum::http::StatusCode::UNAUTHORIZED,
+            "authentication failed",
+        )
+            .into_response());
+    };
+    auth_session.login(&user).await?;
+
+    Ok(axum::response::Redirect::to("/").into_response())
+}
+
+/// POST /logout
+#[tracing::instrument(level = "trace")]
+pub async fn logout(
+    mut auth_session: axum_login::AuthSession<crate::auth::Backend>,
+    axum::Form(()): axum::Form<()>,
+) -> Result<impl axum::response::IntoResponse, crate::web::Ise> {
+    auth_session.logout().await?;
+    Ok(axum::response::Redirect::to("/"))
+}
+
 #[derive(Debug, Clone)]
 pub struct ClientToken {
     pub client_id: oauth2::ClientId,
@@ -46,29 +122,22 @@ const TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 #[derive(Debug, Clone)]
 pub struct Backend {
     db: std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<i64, String>>>,
-    client: oauth2::basic::BasicClient,
+    github_client_id: oauth2::ClientId,
+    github_client_secret: oauth2::ClientSecret,
+    redirect_url: oauth2::RedirectUrl,
 }
 
 impl Backend {
     pub fn new(client_token: ClientToken, redirect_url: oauth2::RedirectUrl) -> Self {
-        let auth_url = oauth2::AuthUrl::new(AUTH_URL.to_string()).unwrap();
-        let token_url = oauth2::TokenUrl::new(TOKEN_URL.to_string()).unwrap();
-
-        let client = oauth2::basic::BasicClient::new(
-            client_token.client_id,
-            Some(client_token.client_secret),
-            auth_url,
-            Some(token_url),
-        )
-        .set_redirect_uri(redirect_url);
         let db = Default::default();
-        Self { db, client }
-    }
-
-    pub fn authorize_url(&self) -> (oauth2::url::Url, oauth2::CsrfToken) {
-        self.client
-            .authorize_url(oauth2::CsrfToken::new_random)
-            .url()
+        let github_client_id = client_token.client_id;
+        let github_client_secret = client_token.client_secret;
+        Self {
+            db,
+            github_client_id,
+            github_client_secret,
+            redirect_url,
+        }
     }
 }
 
@@ -88,19 +157,18 @@ impl axum_login::AuthnBackend for Backend {
         if creds.old_state.secret() != creds.new_state.secret() {
             return Ok(None);
         };
+        let auth_url = oauth2::AuthUrl::new(AUTH_URL.to_string()).unwrap();
+        let token_url = oauth2::TokenUrl::new(TOKEN_URL.to_string()).unwrap();
+        let client = oauth2::basic::BasicClient::new(self.github_client_id.clone())
+            .set_client_secret(self.github_client_secret.clone())
+            .set_auth_uri(auth_url)
+            .set_token_uri(token_url)
+            .set_redirect_uri(self.redirect_url.clone());
 
         // Process authorization code, expecting a token response back.
-        let token_res = self
-            .client
-            .exchange_code(oauth2::AuthorizationCode::new(creds.code))
-            .request_async(|o| async {
-                let res = oauth2::reqwest::async_http_client(o).await;
-                log::debug!("{res:?}");
-                if let Ok(ref res) = res {
-                    log::debug!("{:?}", std::str::from_utf8(&res.body));
-                }
-                res
-            })
+        let token_res = client
+            .exchange_code(oauth2::AuthorizationCode::new(creds.code.clone()))
+            .request_async(&reqwest::Client::new())
             .await
             .map_err(anyhow::Error::from)?;
 

@@ -30,25 +30,6 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let session_store = tower_sessions::MemoryStore::default();
 
-    // let governor_conf = tower_governor::governor::GovernorConfigBuilder::default()
-    //     .per_second(2)
-    //     .burst_size(5)
-    //     .use_headers()
-    //     .finish()
-    //     .unwrap();
-    // let governor_conf = std::sync::Arc::new(governor_conf);
-
-    // tokio::spawn({
-    //     let governor_limiter = governor_conf.limiter().clone();
-    //     async move {
-    //         loop {
-    //             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-    //             tracing::info!("rate limiting storage size: {}", governor_limiter.len());
-    //             governor_limiter.retain_recent();
-    //         }
-    //     }
-    // });
-
     // cookie のセッションの設定
     let mut session_layer = tower_sessions::SessionManagerLayer::new(session_store)
         // oauth でリダイレクトするときにStrict だとエラーになる
@@ -87,9 +68,9 @@ async fn main() -> Result<(), anyhow::Error> {
             "/version",
             axum::routing::get(|| async { build::CLAP_LONG_VERSION }),
         )
-        .route("/login", axum::routing::post(crate::web::login))
-        .route("/logout", axum::routing::post(crate::web::logout))
-        .route("/oauth/callback", axum::routing::get(crate::web::callback))
+        .route("/login", axum::routing::post(crate::auth::login))
+        .route("/logout", axum::routing::post(crate::auth::logout))
+        .route("/oauth/callback", axum::routing::get(crate::auth::callback))
         .layer(axum_login::AuthManagerLayerBuilder::new(backend, session_layer).build())
         .layer(
             tower_http::cors::CorsLayer::very_permissive(), // .allow_credentials(true)
