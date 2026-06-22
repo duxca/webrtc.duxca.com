@@ -1,2 +1,9 @@
 target/
 .github
+.git
+.terraform
+terraform/
+terraform_*/.terraform/
+terraform_*/tfplan
+*.tfstate
+*.tfstate.*

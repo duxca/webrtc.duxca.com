@@ -80,7 +80,7 @@ async fn main() -> Result<(), anyhow::Error> {
         // .layer(tower_governor::GovernorLayer {
         //     config: governor_conf,
         // })
-        .nest_service("/", tower_http::services::ServeDir::new("dist"))
+        .fallback_service(tower_http::services::ServeDir::new("dist"))
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .layer(tower_http::compression::CompressionLayer::new())
         .with_state(state);

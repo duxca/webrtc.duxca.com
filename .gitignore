@@ -1,2 +1,12 @@
 /target
 .env
+.terraform/
+terraform/.terraform/
+terraform_*/.terraform/
+terraform_*/**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+terraform_*/**/tfplan
+crash.log

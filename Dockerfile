@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM rust:1.80.1-bookworm AS builder
+FROM rust:1.96.0-trixie AS builder
 
 WORKDIR /app
 
@@ -25,7 +25,7 @@ RUN \
   --mount=type=cache,target=/var/cache/sccache \
   cargo build --offline --release
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 WORKDIR /app
 
@@ -37,7 +37,6 @@ WORKDIR /app
 #   && apt-get clean \
 #   && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /app/.env /app/.env
 COPY --from=builder /app/target/release/server /app/server
 COPY --from=builder /app/dist /app/dist
 

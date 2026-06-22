@@ -1,0 +1,111 @@
+name: Deploy to Main
+
+env:
+  PROJECT_ID: webrtc-469410
+  PROJECT_NUMBER: 137685276606
+  POOL_ID: githubaction
+  PROVIDER_ID: github
+  SERVICE_ACCOUNT: github-action-webrtc@webrtc-469410.iam.gserviceaccount.com
+  IMAGE_REPOSITORY: asia-northeast1-docker.pkg.dev/webrtc-469410/cloud-run-source-deploy/webrtc
+  IMAGE_TAG: latest
+  CARGO_TERM_COLOR: always
+  RUST_CACHE_SHARED_KEY: rust-webrtc
+
+on:
+  pull_request:
+    branches: [ "main" ]
+    types: [ "closed" ]
+
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        ref: ${{ github.event.pull_request.merge_commit_sha }}
+    - uses: dtolnay/rust-toolchain@stable
+    - uses: Swatinem/rust-cache@v2
+      with:
+        shared-key: ${{ env.RUST_CACHE_SHARED_KEY }}
+    - name: Run unit tests
+      run: cargo test
+    - uses: google-github-actions/auth@v3
+      with:
+        workload_identity_provider: projects/${{ env.PROJECT_NUMBER }}/locations/global/workloadIdentityPools/${{ env.POOL_ID }}/providers/${{ env.PROVIDER_ID }}
+        project_id: ${{ env.PROJECT_ID }}
+        service_account: ${{ env.SERVICE_ACCOUNT }}
+    - uses: google-github-actions/setup-gcloud@v3
+    - uses: hashicorp/setup-terraform@v4
+      with:
+        terraform_version: 1.15.5
+        terraform_wrapper: false
+    - name: Terraform Apply GCP Storage
+      working-directory: ./terraform_gcp_storage
+      run: |
+        set -euo pipefail
+        timeout 5m terraform init
+        timeout 10m terraform plan -out=tfplan -var-file=prod.tfvars
+        timeout 20m terraform apply -auto-approve tfplan
+    - run: gcloud auth configure-docker asia-northeast1-docker.pkg.dev
+    - uses: docker/setup-buildx-action@v4
+    - name: Build and push image
+      id: build
+      uses: docker/build-push-action@v7
+      with:
+        context: .
+        push: true
+        tags: ${{ env.IMAGE_REPOSITORY }}:${{ env.IMAGE_TAG }}
+        cache-from: type=gha,scope=runtime-image
+        cache-to: type=gha,mode=max,scope=runtime-image
+    - name: Resolve pushed image digest
+      id: image
+      run: |
+        set -euo pipefail
+        image="${{ env.IMAGE_REPOSITORY }}@${{ steps.build.outputs.digest }}"
+        echo "image=${image}" >> "${GITHUB_OUTPUT}"
+        echo "Pushed ${image}"
+    - name: Verify Secret Manager versions
+      run: |
+        set -euo pipefail
+        gcloud secrets versions access 1 \
+          --project="${PROJECT_ID}" \
+          --secret="WEBRTC_GITHUB_CLIENT_SECRET" >/dev/null
+    - name: Terraform Apply GCP App
+      working-directory: ./terraform_gcp_app
+      env:
+        CONTAINER_IMAGE: ${{ steps.image.outputs.image }}
+        TF_VAR_github_client_id: ${{ vars.WEBRTC_GITHUB_CLIENT_ID }}
+      run: |
+        set -euo pipefail
+        : "${TF_VAR_github_client_id:?Set repository variable WEBRTC_GITHUB_CLIENT_ID}"
+        timeout 5m terraform init
+        timeout 10m terraform plan -out=tfplan -var-file=prod.tfvars -var="container_image=${CONTAINER_IMAGE}"
+        timeout 20m terraform apply -auto-approve tfplan
+    - name: Terraform Apply Cloudflare
+      working-directory: ./terraform_cf
+      env:
+        CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      run: |
+        set -euo pipefail
+        if [[ -z "${CLOUDFLARE_API_TOKEN:-}" ]]; then
+          echo "CLOUDFLARE_API_TOKEN is not set; skipping Cloudflare apply."
+          exit 0
+        fi
+        timeout 5m terraform init
+        timeout 10m terraform plan -out=tfplan -var-file=prod.tfvars
+        timeout 20m terraform apply -auto-approve tfplan
+    - name: Output Service URL
+      working-directory: ./terraform_gcp_app
+      run: |
+        echo "Deploy complete"
+        echo "Service URL: $(terraform output -raw cloud_run_url)"
