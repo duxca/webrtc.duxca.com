@@ -19,3 +19,7 @@ resource "google_project_service" "artifact_registry_api" {
   disable_on_destroy = false
 }
 
+resource "google_project_service" "iam_credentials_api" {
+  service            = "iamcredentials.googleapis.com"
+  disable_on_destroy = false
+}
