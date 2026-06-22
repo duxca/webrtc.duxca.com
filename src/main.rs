@@ -33,8 +33,7 @@ async fn main() -> Result<(), anyhow::Error> {
     // cookie のセッションの設定
     let mut session_layer = tower_sessions::SessionManagerLayer::new(session_store)
         // oauth でリダイレクトするときにStrict だとエラーになる
-        //.with_same_site(tower_sessions::cookie::SameSite::Lax)
-        .with_same_site(tower_sessions::cookie::SameSite::Strict)
+        .with_same_site(tower_sessions::cookie::SameSite::Lax)
         .with_expiry(tower_sessions::Expiry::OnInactivity(
             std::time::Duration::from_secs(60 * 60 * 24).try_into()?,
         ));

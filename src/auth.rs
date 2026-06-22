@@ -20,6 +20,7 @@ pub async fn login(
         .set_redirect_uri(redirect_url);
     let (auth_url, csrf_state) = client.authorize_url(oauth2::CsrfToken::new_random).url();
     session.insert(CSRF_STATE_KEY, csrf_state.secret()).await?;
+    session.save().await?;
     Ok(axum::response::Redirect::to(auth_url.as_str()).into_response())
 }
 
