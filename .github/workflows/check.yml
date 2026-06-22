@@ -1,0 +1,206 @@
+name: Check Code
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_CACHE_SHARED_KEY: rust-webrtc
+
+on:
+  pull_request:
+    branches: [ "main" ]
+
+concurrency:
+  group: check-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      rust: ${{ steps.changes.outputs.rust }}
+      runtime: ${{ steps.changes.outputs.runtime }}
+      terraform: ${{ steps.changes.outputs.terraform }}
+    steps:
+    - uses: actions/checkout@v6
+    - uses: dorny/paths-filter@v4
+      id: changes
+      with:
+        filters: |
+          rust:
+            - '**/*.rs'
+            - '**/Cargo.toml'
+            - '**/Cargo.lock'
+            - '.github/workflows/**'
+            - 'Makefile'
+            - 'build.rs'
+          runtime:
+            - '**/*.rs'
+            - '**/Cargo.toml'
+            - '**/Cargo.lock'
+            - 'Dockerfile'
+            - '.dockerignore'
+            - 'dist/**'
+            - 'build.rs'
+          terraform:
+            - 'terraform_*/**'
+            - '.github/workflows/**'
+
+  fmt:
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
+    runs-on: ubuntu-24.04
+    steps:
+    - uses: actions/checkout@v6
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        components: rustfmt
+    - uses: cargo-bins/cargo-binstall@v1.20.0
+    - run: cargo binstall -y --force cargo-tomlfmt
+    - run: cargo fmt --all -- --check
+    - run: |
+        set -euo pipefail
+        find . -name Cargo.toml.new -delete
+        trap 'find . -name Cargo.toml.new -delete' EXIT
+        find . -name Cargo.toml -print0 | while IFS= read -r -d '' manifest; do
+          (cd "$(dirname "$manifest")" && cargo tomlfmt -d)
+        done
+
+  clippy:
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
+    runs-on: ubuntu-24.04
+    steps:
+    - uses: actions/checkout@v6
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        components: clippy
+    - uses: Swatinem/rust-cache@v2
+      with:
+        shared-key: ${{ env.RUST_CACHE_SHARED_KEY }}
+    - run: cargo clippy --all-targets --all-features -- -Dwarnings
+
+  test:
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
+    runs-on: ubuntu-24.04
+    steps:
+    - uses: actions/checkout@v6
+    - uses: dtolnay/rust-toolchain@stable
+    - uses: Swatinem/rust-cache@v2
+      with:
+        shared-key: ${{ env.RUST_CACHE_SHARED_KEY }}
+    - run: cargo test
+
+  runtime-image:
+    needs: changes
+    if: ${{ needs.changes.outputs.runtime == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+    - uses: actions/checkout@v6
+    - uses: docker/setup-buildx-action@v4
+    - name: Build runtime image
+      uses: docker/build-push-action@v7
+      with:
+        context: .
+        load: true
+        tags: webrtc-runtime-smoke:pr
+        cache-from: type=gha,scope=runtime-image
+        cache-to: type=gha,mode=max,scope=runtime-image
+    - name: Smoke test runtime server boot
+      run: |
+        set -euo pipefail
+        container_id="$(
+          docker run -d --rm \
+            -e HOST_ADDR=0.0.0.0:8080 \
+            -e GITHUB_CLIENT_ID=dummy \
+            -e GITHUB_CLIENT_SECRET=dummy \
+            -e REDIRECT_URL='http://127.0.0.1:18080/oauth/callback' \
+            -e LOCAL_CLIENT_ID=local \
+            -e LOCAL_CLIENT_SECRET=local \
+            -e LOCAL_REDIRECT_URL='http://127.0.0.1:18080/oauth/callback' \
+            -p 18080:8080 \
+            webrtc-runtime-smoke:pr
+        )"
+        trap 'docker logs "$container_id"; docker rm -f "$container_id" >/dev/null 2>&1 || true' EXIT
+        for _ in {1..30}; do
+          curl -fsS http://127.0.0.1:18080/version >/dev/null && exit 0
+          sleep 1
+        done
+        exit 1
+
+  terraform-plan:
+    needs: changes
+    if: |
+      github.event_name == 'pull_request' &&
+      needs.changes.outputs.terraform == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+    - uses: actions/checkout@v6
+    - uses: hashicorp/setup-terraform@v4
+      with:
+        terraform_version: 1.15.5
+        terraform_wrapper: false
+    - name: Terraform Init
+      run: |
+        terraform -chdir=terraform_bootstrap/bootstrap init -backend=false
+        terraform -chdir=terraform_gcp_storage init -backend=false
+        terraform -chdir=terraform_gcp_app init -backend=false
+        terraform -chdir=terraform_bootstrap init -backend=false
+        terraform -chdir=terraform_cf init -backend=false
+    - name: Terraform Validate
+      run: |
+        terraform -chdir=terraform_bootstrap/bootstrap validate
+        terraform -chdir=terraform_gcp_storage validate
+        terraform -chdir=terraform_gcp_app validate
+        terraform -chdir=terraform_bootstrap validate
+        terraform -chdir=terraform_cf validate
+    - name: Terraform Format Check
+      run: |
+        terraform -chdir=terraform_bootstrap/bootstrap fmt -check
+        terraform -chdir=terraform_gcp_storage fmt -recursive -check
+        terraform -chdir=terraform_gcp_app fmt -check
+        terraform -chdir=terraform_bootstrap fmt -check
+        terraform -chdir=terraform_cf fmt -check
+    - name: Write Terraform Validation Summary
+      run: |
+        set -euo pipefail
+        cat > terraform-plan.txt <<'EOF'
+        Terraform validation completed without cloud credentials.
+
+        This PR workflow intentionally uses `terraform init -backend=false`,
+        `terraform validate`, and `terraform fmt -check` only. Cloud-backed
+        Terraform plan/apply runs are reserved for the trusted main deploy
+        workflow after merge.
+        EOF
+    - name: Post Terraform Validation to PR
+      uses: actions/github-script@v9
+      with:
+        script: |
+          const fs = require('fs');
+          const plan = fs.readFileSync('./terraform-plan.txt', 'utf8');
+          const output = `## Terraform Validation Results
+
+          <details>
+          <summary>Validation Output</summary>
+
+          \`\`\`
+          ${plan}
+          \`\`\`
+
+          </details>
+
+          *Pusher: @${{ github.actor }}, Action: \`${{ github.event_name }}\`*
+          `;
+
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: output
+          });

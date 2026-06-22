@@ -20,6 +20,7 @@ pub async fn login(
         .set_redirect_uri(redirect_url);
     let (auth_url, csrf_state) = client.authorize_url(oauth2::CsrfToken::new_random).url();
     session.insert(CSRF_STATE_KEY, csrf_state.secret()).await?;
+    session.save().await?;
     Ok(axum::response::Redirect::to(auth_url.as_str()).into_response())
 }
 
@@ -141,7 +142,6 @@ impl Backend {
     }
 }
 
-#[async_trait::async_trait]
 impl axum_login::AuthnBackend for Backend {
     type User = User;
     type Credentials = Credentials;
@@ -168,7 +168,7 @@ impl axum_login::AuthnBackend for Backend {
         // Process authorization code, expecting a token response back.
         let token_res = client
             .exchange_code(oauth2::AuthorizationCode::new(creds.code.clone()))
-            .request_async(&reqwest::Client::new())
+            .request_async(&oauth2::reqwest::Client::new())
             .await
             .map_err(anyhow::Error::from)?;
 

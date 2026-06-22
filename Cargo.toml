@@ -12,7 +12,7 @@ anyhow = "1"
 async-trait = "0.1"
 axum = "0.8"
 #axum-extra = { version = "0.10", features = ["cookie"] }
-axum-login = "0.17"
+axum-login = "0.18"
 chrono = { version = "0.4", features = ["serde"] }
 derive_more = { version = "2.0.1", features = ["full"] }
 dotenvy = "0.15"
@@ -21,14 +21,14 @@ envy = "0.4.2"
 futures = "0.3.30"
 log = "0.4.22"
 oauth2 = "5.0"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-shadow-rs = "1.1"
+shadow-rs = "2.0"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 #tokio-stream = { version = "0.1", features = ["full"] }
-tower-http = { version = "0.6", features = ["trace", "compression-zstd", "cors", "fs"] }
+tower-http = { version = "0.7", features = ["trace", "compression-zstd", "cors", "fs"] }
 tower-sessions = { version = "0.14", features = ["signed"] }
 #tower_governor = "0.7"
 tracing = "0.1"
@@ -44,4 +44,4 @@ hyper-util = { version = "0.1", features = ["client", "http1", "client-legacy"] 
 tower = { version = "0.5", features = ["util"] }
 
 [build-dependencies]
-shadow-rs = "1.1"
+shadow-rs = "2.0"
