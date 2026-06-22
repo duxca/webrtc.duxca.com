@@ -12,9 +12,8 @@ env:
   RUST_CACHE_SHARED_KEY: rust-webrtc
 
 on:
-  pull_request:
+  push:
     branches: [ "main" ]
-    types: [ "closed" ]
 
 concurrency:
   group: deploy-main
@@ -22,17 +21,13 @@ concurrency:
 
 jobs:
   deploy:
-    if: github.event.pull_request.merged == true
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
       contents: read
-      pull-requests: write
       id-token: write
     steps:
     - uses: actions/checkout@v6
-      with:
-        ref: ${{ github.event.pull_request.merge_commit_sha }}
     - uses: dtolnay/rust-toolchain@stable
     - uses: Swatinem/rust-cache@v2
       with:

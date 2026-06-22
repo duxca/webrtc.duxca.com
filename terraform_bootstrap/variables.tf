@@ -31,6 +31,12 @@ variable "deployer_service_account_id" {
   default     = "github-action-webrtc"
 }
 
+variable "plan_service_account_id" {
+  description = "GitHub Actions read-only Terraform plan service account ID."
+  type        = string
+  default     = "github-action-webrtc-plan"
+}
+
 variable "terraform_state_bucket" {
   description = "Terraform state bucket name."
   type        = string

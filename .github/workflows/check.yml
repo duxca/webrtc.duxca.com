@@ -134,62 +134,25 @@ jobs:
   terraform-plan:
     needs: changes
     if: |
-      github.event.pull_request.user.login == 'legokichi' &&
       github.event_name == 'pull_request' &&
       needs.changes.outputs.terraform == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: write
-      id-token: write
-    env:
-      PROJECT_ID: webrtc-469410
-      PROJECT_NUMBER: 137685276606
-      POOL_ID: githubaction
-      PROVIDER_ID: github
-      SERVICE_ACCOUNT: github-action-webrtc@webrtc-469410.iam.gserviceaccount.com
-      REGION: asia-northeast1
-      SERVICE_NAME: webrtc
     steps:
     - uses: actions/checkout@v6
-    - uses: google-github-actions/auth@v3
-      with:
-        workload_identity_provider: projects/${{ env.PROJECT_NUMBER }}/locations/global/workloadIdentityPools/${{ env.POOL_ID }}/providers/${{ env.PROVIDER_ID }}
-        project_id: ${{ env.PROJECT_ID }}
-        service_account: ${{ env.SERVICE_ACCOUNT }}
-    - uses: google-github-actions/setup-gcloud@v3
-    - name: Resolve current deployed image
-      id: current_image
-      run: |
-        set -euo pipefail
-        container_image="$(gcloud run services describe "${SERVICE_NAME}" \
-          --project "${PROJECT_ID}" \
-          --region "${REGION}" \
-          --format='value(spec.template.spec.containers[0].image)' 2>/dev/null || true)"
-        if [[ -z "${container_image}" ]]; then
-          container_image="${REGION}-docker.pkg.dev/${PROJECT_ID}/cloud-run-source-deploy/${SERVICE_NAME}:latest"
-        fi
-        echo "container_image=${container_image}" >> "${GITHUB_OUTPUT}"
     - uses: hashicorp/setup-terraform@v4
       with:
         terraform_version: 1.15.5
         terraform_wrapper: false
     - name: Terraform Init
       run: |
-        if gcloud storage buckets describe gs://webrtc-469410-terraform-state >/dev/null 2>&1; then
-          terraform -chdir=terraform_bootstrap/bootstrap init
-          terraform -chdir=terraform_gcp_storage init
-          terraform -chdir=terraform_gcp_app init
-          terraform -chdir=terraform_bootstrap init
-          terraform -chdir=terraform_cf init
-        else
-          echo "Terraform state bucket does not exist yet; using local init only for validation."
-          terraform -chdir=terraform_bootstrap/bootstrap init -backend=false
-          terraform -chdir=terraform_gcp_storage init -backend=false
-          terraform -chdir=terraform_gcp_app init -backend=false
-          terraform -chdir=terraform_bootstrap init -backend=false
-          terraform -chdir=terraform_cf init -backend=false
-        fi
+        terraform -chdir=terraform_bootstrap/bootstrap init -backend=false
+        terraform -chdir=terraform_gcp_storage init -backend=false
+        terraform -chdir=terraform_gcp_app init -backend=false
+        terraform -chdir=terraform_bootstrap init -backend=false
+        terraform -chdir=terraform_cf init -backend=false
     - name: Terraform Validate
       run: |
         terraform -chdir=terraform_bootstrap/bootstrap validate
@@ -204,79 +167,27 @@ jobs:
         terraform -chdir=terraform_gcp_app fmt -check
         terraform -chdir=terraform_bootstrap fmt -check
         terraform -chdir=terraform_cf fmt -check
-    - name: Terraform Plan
-      env:
-        CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        CONTAINER_IMAGE: ${{ steps.current_image.outputs.container_image }}
-        TF_VAR_github_client_id: ${{ vars.WEBRTC_GITHUB_CLIENT_ID }}
+    - name: Write Terraform Validation Summary
       run: |
         set -euo pipefail
-        : "${TF_VAR_github_client_id:?Set repository variable WEBRTC_GITHUB_CLIENT_ID}"
-        : > terraform-plan.txt
+        cat > terraform-plan.txt <<'EOF'
+        Terraform validation completed without cloud credentials.
 
-        {
-          echo "## terraform_bootstrap/bootstrap"
-          if gcloud storage buckets describe gs://webrtc-469410-terraform-state >/dev/null 2>&1; then
-            terraform -chdir=terraform_bootstrap/bootstrap plan -no-color -out=tfplan -var-file=prod.tfvars
-            terraform -chdir=terraform_bootstrap/bootstrap show -no-color tfplan
-          else
-            echo "Skipped because gs://webrtc-469410-terraform-state does not exist yet."
-          fi
-        } >> terraform-plan.txt
-
-        {
-          echo
-          echo "## terraform_gcp_storage"
-          terraform -chdir=terraform_gcp_storage plan -no-color -out=tfplan -var-file=prod.tfvars
-          terraform -chdir=terraform_gcp_storage show -no-color tfplan
-        } >> terraform-plan.txt
-
-        if terraform -chdir=terraform_gcp_storage output -raw webrtc_container_service_account_email >/dev/null 2>&1; then
-          {
-            echo
-            echo "## terraform_gcp_app"
-            terraform -chdir=terraform_gcp_app plan -no-color -out=tfplan -var-file=prod.tfvars -var="container_image=${CONTAINER_IMAGE}"
-            terraform -chdir=terraform_gcp_app show -no-color tfplan
-          } >> terraform-plan.txt
-        else
-          {
-            echo
-            echo "## terraform_gcp_app"
-            echo "Skipped because terraform_gcp_storage remote state has no outputs yet."
-          } >> terraform-plan.txt
-        fi
-
-        {
-          echo
-          echo "## terraform_bootstrap"
-          terraform -chdir=terraform_bootstrap plan -no-color -out=tfplan -var-file=prod.tfvars
-          terraform -chdir=terraform_bootstrap show -no-color tfplan
-        } >> terraform-plan.txt
-
-        if [[ -n "${CLOUDFLARE_API_TOKEN:-}" ]]; then
-          {
-            echo
-            echo "## terraform_cf"
-            terraform -chdir=terraform_cf plan -no-color -out=tfplan -var-file=prod.tfvars
-            terraform -chdir=terraform_cf show -no-color tfplan
-          } >> terraform-plan.txt
-        else
-          {
-            echo
-            echo "## terraform_cf"
-            echo "Skipped because CLOUDFLARE_API_TOKEN is not available."
-          } >> terraform-plan.txt
-        fi
-    - name: Post Plan to PR
+        This PR workflow intentionally uses `terraform init -backend=false`,
+        `terraform validate`, and `terraform fmt -check` only. Cloud-backed
+        Terraform plan/apply runs are reserved for the trusted main deploy
+        workflow after merge.
+        EOF
+    - name: Post Terraform Validation to PR
       uses: actions/github-script@v9
       with:
         script: |
           const fs = require('fs');
           const plan = fs.readFileSync('./terraform-plan.txt', 'utf8');
-          const output = `## Terraform Plan Results
+          const output = `## Terraform Validation Results
 
           <details>
-          <summary>Terraform Plan Output</summary>
+          <summary>Validation Output</summary>
 
           \`\`\`
           ${plan}
