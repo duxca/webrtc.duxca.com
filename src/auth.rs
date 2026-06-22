@@ -141,7 +141,6 @@ impl Backend {
     }
 }
 
-#[async_trait::async_trait]
 impl axum_login::AuthnBackend for Backend {
     type User = User;
     type Credentials = Credentials;
@@ -168,7 +167,7 @@ impl axum_login::AuthnBackend for Backend {
         // Process authorization code, expecting a token response back.
         let token_res = client
             .exchange_code(oauth2::AuthorizationCode::new(creds.code.clone()))
-            .request_async(&reqwest::Client::new())
+            .request_async(&oauth2::reqwest::Client::new())
             .await
             .map_err(anyhow::Error::from)?;
 

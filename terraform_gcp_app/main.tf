@@ -56,7 +56,7 @@ resource "google_cloud_run_v2_service" "webrtc" {
         value_source {
           secret_key_ref {
             secret  = "WEBRTC_GITHUB_CLIENT_SECRET"
-            version = "1"
+            version = "latest"
           }
         }
       }
