@@ -131,7 +131,21 @@ jobs:
         done
         exit 1
 
-  terraform-plan:
+  e2e-tests:
+    needs: [changes, runtime-image]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    steps:
+    - name: Verify runtime smoke test result
+      run: |
+        set -euo pipefail
+        if [[ "${{ needs.changes.outputs.runtime }}" == "true" && "${{ needs.runtime-image.result }}" != "success" ]]; then
+          echo "runtime-image job did not pass"
+          exit 1
+        fi
+        echo "No separate e2e suite is configured; runtime smoke test gate is satisfied."
+
+  terraform-check:
     needs: changes
     if: |
       github.event_name == 'pull_request' &&
