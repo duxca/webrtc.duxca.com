@@ -1,5 +1,7 @@
 # webrtc.duxca.com
 
+[![Deploy to Main](https://github.com/duxca/webrtc.duxca.com/actions/workflows/deploy.yml/badge.svg?branch=main)](https://github.com/duxca/webrtc.duxca.com/actions/workflows/deploy.yml)
+
 Rust WebRTC signaling server deployed to Cloud Run.
 
 ## Initial Infrastructure Setup
