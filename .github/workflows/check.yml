@@ -62,7 +62,7 @@ jobs:
       with:
         toolchain: stable
         components: rustfmt
-    - uses: cargo-bins/cargo-binstall@30b5ca8b54e1dcffd9548bc87ede1531310fdc67 # v1.20.0
+    - uses: cargo-bins/cargo-binstall@851112458b5f28a29e5bc14a690c3f283d9dcc6f # v1.26.2
     - run: cargo binstall -y --force cargo-tomlfmt@0.2.1
     - run: cargo fmt --all -- --check
     - run: |
