@@ -30,6 +30,10 @@ WORKDIR /app
 
 COPY --from=builder /app/target/release/server /app/server
 COPY --from=builder /app/dist /app/dist
+# The GitHub API client verifies TLS against the system roots and panicked in
+# production without them (I1). Reuse the builder's digest-pinned bundle.
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 
 USER 65532:65532
 EXPOSE 8080

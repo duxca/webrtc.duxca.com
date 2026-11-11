@@ -142,6 +142,38 @@ jobs:
           sleep 1
         done
         exit 1
+    # I1: without CA roots the GitHub API client cannot be built and sign-in fails.
+    - name: Check CA bundle is readable by the runtime user
+      run: |
+        set -euo pipefail
+        docker run --rm --entrypoint /bin/sh webrtc-runtime-smoke:pr -c \
+          'test -n "$SSL_CERT_FILE" && test -r "$SSL_CERT_FILE" && test "$(grep -c "BEGIN CERTIFICATE" "$SSL_CERT_FILE")" -gt 100'
+    - name: Smoke test OAuth callback reaches GitHub
+      run: |
+        set -euo pipefail
+        container_id="$(
+          docker run -d --rm \
+            -e HOST_ADDR=0.0.0.0:8080 \
+            -e GITHUB_CLIENT_ID=dummy \
+            -e GITHUB_CLIENT_SECRET=dummy \
+            -e REDIRECT_URL='http://127.0.0.1:18080/oauth/callback' \
+            -p 18080:8080 \
+            webrtc-runtime-smoke:pr
+        )"
+        trap 'docker logs "$container_id"; docker rm -f "$container_id" >/dev/null 2>&1 || true' EXIT
+        for _ in {1..30}; do
+          curl -fsS http://127.0.0.1:18080/version >/dev/null && break
+          sleep 1
+        done
+        headers="$(curl -sS -D - -o /dev/null -X POST -H 'Sec-Fetch-Site: same-origin' http://127.0.0.1:18080/login | tr -d '\r')"
+        cookie="$(sed -nE 's/^[Ss]et-[Cc]ookie: (__Host-login=[^;]+);.*/\1/p' <<<"$headers")"
+        state="$(sed -nE 's/^[Ll]ocation: .*[?&]state=([^&]+).*/\1/p' <<<"$headers")"
+        # Both HTTP clients are built before the token exchange, so a fake code
+        # gets 401 from GitHub only when TLS setup works; a missing CA bundle is 500.
+        status="$(curl -sS -o /dev/null -w '%{http_code}' -H "Cookie: ${cookie}" \
+          "http://127.0.0.1:18080/oauth/callback?code=ci-fake-code&state=${state}")"
+        echo "callback status: ${status}"
+        test "${status}" = 401
 
   e2e-tests:
     needs: [changes, runtime-image]

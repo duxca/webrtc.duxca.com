@@ -197,6 +197,13 @@ impl AuthnBackend for Backend {
             .redirect(oauth2::reqwest::redirect::Policy::none())
             .build()
             .context("build OAuth HTTP client")?;
+        // Built before the one-time code is spent: unlike the OAuth client, this
+        // one needs the system CA roots (SSL_CERT_FILE), so a missing bundle
+        // fails every callback here instead of after GitHub consumed the code.
+        let api_http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .context("build GitHub API client")?;
         let token = match self
             .0
             .oauth
@@ -222,10 +229,6 @@ impl AuthnBackend for Backend {
             id: i64,
             login: String,
         }
-        let api_http = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .context("build GitHub API client")?;
         let profile: GitHubUser = api_http
             .get(self.0.user_endpoint.clone())
             .bearer_auth(token.access_token().secret())
