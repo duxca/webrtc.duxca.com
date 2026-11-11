@@ -198,8 +198,9 @@ impl AuthnBackend for Backend {
             .build()
             .context("build OAuth HTTP client")?;
         // Built before the one-time code is spent: unlike the OAuth client, this
-        // one needs the system CA roots (SSL_CERT_FILE), so a missing bundle
-        // fails every callback here instead of after GitHub consumed the code.
+        // one needs the system CA store (ca-certificates in the runtime image),
+        // so a missing bundle fails every callback here instead of after GitHub
+        // consumed the code.
         let api_http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()

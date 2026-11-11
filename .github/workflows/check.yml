@@ -143,11 +143,11 @@ jobs:
         done
         exit 1
     # I1: without CA roots the GitHub API client cannot be built and sign-in fails.
-    - name: Check CA bundle is readable by the runtime user
+    - name: Check system CA bundle is readable by the runtime user
       run: |
         set -euo pipefail
         docker run --rm --entrypoint /bin/sh webrtc-runtime-smoke:pr -c \
-          'test -n "$SSL_CERT_FILE" && test -r "$SSL_CERT_FILE" && test "$(grep -c "BEGIN CERTIFICATE" "$SSL_CERT_FILE")" -gt 100'
+          'bundle=/etc/ssl/certs/ca-certificates.crt; test "$(id -u)" = 65532 && test -r "$bundle" && test "$(grep -c "BEGIN CERTIFICATE" "$bundle")" -gt 100'
     - name: Smoke test OAuth callback reaches GitHub
       run: |
         set -euo pipefail

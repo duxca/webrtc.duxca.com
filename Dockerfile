@@ -20,20 +20,12 @@ FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f0
 
 WORKDIR /app
 
-# RUN \
-#   --mount=type=cache,target=/var/lib/apt,sharing=locked \
-#   --mount=type=cache,target=/var/cache/apt,sharing=locked \
-#   apt-get update && apt-get install -y \
-#   ca-certificates openssl \
-#   && apt-get clean \
-#   && rm -rf /var/lib/apt/lists/*
+# The GitHub API client verifies TLS against the system CA store (I1); same
+# pattern as river.duxca.com and mcp.duxca.com.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/release/server /app/server
 COPY --from=builder /app/dist /app/dist
-# The GitHub API client verifies TLS against the system roots and panicked in
-# production without them (I1). Reuse the builder's digest-pinned bundle.
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 
 USER 65532:65532
 EXPOSE 8080
