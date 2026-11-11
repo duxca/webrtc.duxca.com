@@ -19,16 +19,18 @@ dotenvy = "0.15"
 #env_logger = "0.11.5"
 envy = "0.4.2"
 futures = "0.3.30"
-log = "0.4.22"
+getrandom = "0.4"
 oauth2 = "5.0"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-shadow-rs = "2.0"
+subtle = "2"
 thiserror = "2"
+time = "0.3"
 tokio = { version = "1", features = ["full"] }
 #tokio-stream = { version = "0.1", features = ["full"] }
-tower-http = { version = "0.7", features = ["trace", "compression-zstd", "cors", "fs"] }
+tower-cookies = { version = "0.11", features = ["signed"] }
+tower-http = { version = "0.7", features = ["trace", "compression-zstd", "fs", "set-header"] }
 tower-sessions = { version = "0.14", features = ["signed"] }
 #tower_governor = "0.7"
 tracing = "0.1"
@@ -38,10 +40,9 @@ tracing-subscriber = { version = "0.3", features = ["std", "env-filter", "time",
 #uuid = { version = "1", features = ["serde", "v4"] }
 
 [dev-dependencies]
+base64 = "0.22"
 http-body-util = "0.1.0"
 hyper = { version = "1.0.0", features = ["full"] }
 hyper-util = { version = "0.1", features = ["client", "http1", "client-legacy"] }
+sha2 = "0.10"
 tower = { version = "0.5", features = ["util"] }
-
-[build-dependencies]
-shadow-rs = "2.0"

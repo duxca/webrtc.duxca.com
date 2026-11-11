@@ -8,6 +8,9 @@ on:
   pull_request:
     branches: [ "main" ]
 
+permissions:
+  contents: read
+
 concurrency:
   group: check-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -23,8 +26,10 @@ jobs:
       runtime: ${{ steps.changes.outputs.runtime }}
       terraform: ${{ steps.changes.outputs.terraform }}
     steps:
-    - uses: actions/checkout@v6
-    - uses: dorny/paths-filter@v4
+    - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      with:
+        persist-credentials: false
+    - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
       id: changes
       with:
         filters: |
@@ -34,7 +39,6 @@ jobs:
             - '**/Cargo.lock'
             - '.github/workflows/**'
             - 'Makefile'
-            - 'build.rs'
           runtime:
             - '**/*.rs'
             - '**/Cargo.toml'
@@ -42,7 +46,6 @@ jobs:
             - 'Dockerfile'
             - '.dockerignore'
             - 'dist/**'
-            - 'build.rs'
           terraform:
             - 'terraform_*/**'
             - '.github/workflows/**'
@@ -52,12 +55,15 @@ jobs:
     if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-24.04
     steps:
-    - uses: actions/checkout@v6
-    - uses: dtolnay/rust-toolchain@stable
+    - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
       with:
+        persist-credentials: false
+    - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      with:
+        toolchain: stable
         components: rustfmt
-    - uses: cargo-bins/cargo-binstall@v1.20.0
-    - run: cargo binstall -y --force cargo-tomlfmt
+    - uses: cargo-bins/cargo-binstall@30b5ca8b54e1dcffd9548bc87ede1531310fdc67 # v1.20.0
+    - run: cargo binstall -y --force cargo-tomlfmt@0.2.1
     - run: cargo fmt --all -- --check
     - run: |
         set -euo pipefail
@@ -72,11 +78,14 @@ jobs:
     if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-24.04
     steps:
-    - uses: actions/checkout@v6
-    - uses: dtolnay/rust-toolchain@stable
+    - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
       with:
+        persist-credentials: false
+    - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      with:
+        toolchain: stable
         components: clippy
-    - uses: Swatinem/rust-cache@v2
+    - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       with:
         shared-key: ${{ env.RUST_CACHE_SHARED_KEY }}
     - run: cargo clippy --all-targets --all-features -- -Dwarnings
@@ -86,9 +95,13 @@ jobs:
     if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-24.04
     steps:
-    - uses: actions/checkout@v6
-    - uses: dtolnay/rust-toolchain@stable
-    - uses: Swatinem/rust-cache@v2
+    - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      with:
+        persist-credentials: false
+    - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      with:
+        toolchain: stable
+    - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       with:
         shared-key: ${{ env.RUST_CACHE_SHARED_KEY }}
     - run: cargo test
@@ -99,10 +112,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
-    - uses: actions/checkout@v6
-    - uses: docker/setup-buildx-action@v4
+    - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      with:
+        persist-credentials: false
+    - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
     - name: Build runtime image
-      uses: docker/build-push-action@v7
+      uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
       with:
         context: .
         load: true
@@ -118,9 +133,6 @@ jobs:
             -e GITHUB_CLIENT_ID=dummy \
             -e GITHUB_CLIENT_SECRET=dummy \
             -e REDIRECT_URL='http://127.0.0.1:18080/oauth/callback' \
-            -e LOCAL_CLIENT_ID=local \
-            -e LOCAL_CLIENT_SECRET=local \
-            -e LOCAL_REDIRECT_URL='http://127.0.0.1:18080/oauth/callback' \
             -p 18080:8080 \
             webrtc-runtime-smoke:pr
         )"
@@ -155,8 +167,10 @@ jobs:
       contents: read
       pull-requests: write
     steps:
-    - uses: actions/checkout@v6
-    - uses: hashicorp/setup-terraform@v4
+    - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      with:
+        persist-credentials: false
+    - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
       with:
         terraform_version: 1.15.5
         terraform_wrapper: false
@@ -165,6 +179,7 @@ jobs:
         terraform -chdir=terraform_bootstrap/bootstrap init -backend=false
         terraform -chdir=terraform_gcp_storage init -backend=false
         terraform -chdir=terraform_gcp_app init -backend=false
+        terraform -chdir=terraform_gcp_edge init -backend=false
         terraform -chdir=terraform_bootstrap init -backend=false
         terraform -chdir=terraform_cf init -backend=false
     - name: Terraform Validate
@@ -172,6 +187,7 @@ jobs:
         terraform -chdir=terraform_bootstrap/bootstrap validate
         terraform -chdir=terraform_gcp_storage validate
         terraform -chdir=terraform_gcp_app validate
+        terraform -chdir=terraform_gcp_edge validate
         terraform -chdir=terraform_bootstrap validate
         terraform -chdir=terraform_cf validate
     - name: Terraform Format Check
@@ -179,6 +195,7 @@ jobs:
         terraform -chdir=terraform_bootstrap/bootstrap fmt -check
         terraform -chdir=terraform_gcp_storage fmt -recursive -check
         terraform -chdir=terraform_gcp_app fmt -check
+        terraform -chdir=terraform_gcp_edge fmt -check
         terraform -chdir=terraform_bootstrap fmt -check
         terraform -chdir=terraform_cf fmt -check
     - name: Write Terraform Validation Summary
@@ -193,7 +210,10 @@ jobs:
         workflow after merge.
         EOF
     - name: Post Terraform Validation to PR
-      uses: actions/github-script@v9
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+      env:
+        ACTOR: ${{ github.actor }}
+        EVENT_NAME: ${{ github.event_name }}
       with:
         script: |
           const fs = require('fs');
@@ -209,7 +229,7 @@ jobs:
 
           </details>
 
-          *Pusher: @${{ github.actor }}, Action: \`${{ github.event_name }}\`*
+          *Pusher: @${process.env.ACTOR}, Action: \`${process.env.EVENT_NAME}\`*
           `;
 
           github.rest.issues.createComment({

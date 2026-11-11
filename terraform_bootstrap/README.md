@@ -1,14 +1,16 @@
 # Bootstrap Terraform
 
-This stack manages the GitHub Actions deployment identity for `duxca/webrtc.duxca.com` in `webrtc-469410`:
+This stack manages the GitHub Actions deployment identity for `duxca/webrtc.duxca.com` in `webrtc-469410`. An administrator applies it; GitHub Actions never does.
 
-- Terraform state bucket, via `bootstrap/`
+- Terraform state bucket registration, via `bootstrap/`
 - GitHub Actions deployer service account
-- Workload Identity Pool and Provider
-- GitHub repository impersonation binding
-- project IAM for deploys
-- Terraform state bucket access
-- `roles/iam.serviceAccountUser` on the Cloud Run runtime service account
+- Workload Identity Pool and Provider. Tokens are accepted only for the repository and owner numeric ids, `push` to `refs/heads/main`, the `Deploy to Main` workflow and the `production` environment.
+- Deployer IAM, kept to what a revision rollout needs:
+  - `roles/run.developer` on the project
+  - `roles/iam.serviceAccountUser` on the Cloud Run runtime service account
+  - `roles/artifactregistry.writer` on the `cloud-run-source-deploy` repository
+  - `roles/secretmanager.viewer` on `WEBRTC_GITHUB_CLIENT_SECRET` (metadata only)
+  - `roles/storage.objectAdmin` on the Terraform state bucket
 
 ## Usage
 

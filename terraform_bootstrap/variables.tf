@@ -8,9 +8,26 @@ variable "project_number" {
   type        = string
 }
 
-variable "github_repository" {
-  description = "GitHub repository allowed to impersonate the deployer service account."
+variable "region" {
+  description = "Region of the Artifact Registry repository."
   type        = string
+  default     = "asia-northeast1"
+}
+
+variable "github_repository_id" {
+  description = "Numeric GitHub repository id allowed to impersonate the deployer (gh api repos/OWNER/REPO --jq .id)."
+  type        = string
+}
+
+variable "github_repository_owner_id" {
+  description = "Numeric GitHub id of the repository owner (gh api repos/OWNER/REPO --jq .owner.id)."
+  type        = string
+}
+
+variable "github_deploy_environment" {
+  description = "GitHub Actions environment of the deploy job."
+  type        = string
+  default     = "production"
 }
 
 variable "workload_identity_pool_id" {
@@ -31,16 +48,22 @@ variable "deployer_service_account_id" {
   default     = "github-action-webrtc"
 }
 
-variable "plan_service_account_id" {
-  description = "GitHub Actions read-only Terraform plan service account ID."
-  type        = string
-  default     = "github-action-webrtc-plan"
-}
-
 variable "terraform_state_bucket" {
   description = "Terraform state bucket name."
   type        = string
   default     = "webrtc-469410-terraform-state"
+}
+
+variable "artifact_registry_repository" {
+  description = "Artifact Registry repository the deployer pushes images to."
+  type        = string
+  default     = "cloud-run-source-deploy"
+}
+
+variable "github_client_secret_id" {
+  description = "Secret Manager secret holding the GitHub OAuth client secret."
+  type        = string
+  default     = "WEBRTC_GITHUB_CLIENT_SECRET"
 }
 
 variable "app_service_account_email" {

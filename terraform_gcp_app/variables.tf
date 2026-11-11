@@ -15,12 +15,6 @@ variable "service_name" {
   default     = "webrtc"
 }
 
-variable "domain_name" {
-  description = "Custom domain mapped to the Cloud Run service."
-  type        = string
-  default     = "webrtc.duxca.com"
-}
-
 variable "container_image" {
   description = "Container image deployed to Cloud Run."
   type        = string
@@ -29,6 +23,12 @@ variable "container_image" {
 variable "github_client_id" {
   description = "GitHub OAuth client ID."
   type        = string
+}
+
+variable "allowed_github_ids" {
+  description = "Comma-separated GitHub user ids allowed to sign in. Empty keeps sign-in open to every GitHub account."
+  type        = string
+  default     = ""
 }
 
 variable "redirect_url" {

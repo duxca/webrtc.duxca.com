@@ -4,6 +4,41 @@
 
 Rust WebRTC signaling server deployed to Cloud Run.
 
+## Configuration
+
+| Variable | Required | Description |
+|---|---|---|
+| `HOST_ADDR` | yes | Listen address, e.g. `0.0.0.0:8080` |
+| `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | yes | GitHub OAuth app |
+| `REDIRECT_URL` | yes | `https://<host>/oauth/callback`; its origin is also the origin accepted for state-changing requests |
+| `ALLOWED_GITHUB_IDS` | no | Comma-separated numeric GitHub user ids allowed to sign in (`gh api users/<login> --jq .id`). Unset or empty: any GitHub account can sign in |
+
+In production `ALLOWED_GITHUB_IDS` comes from the repository variable `WEBRTC_ALLOWED_GITHUB_IDS`.
+
+## Local Development
+
+Register a separate GitHub OAuth app whose callback is `http://127.0.0.1:8080/oauth/callback`, put its values in `.env`, then run `./run_local.bash`. The `local` feature drops the `Secure` flag and `__Host-` prefix from cookies so they work over plain HTTP; it refuses to compile in release builds.
+
+```bash
+HOST_ADDR=127.0.0.1:8080
+GITHUB_CLIENT_ID=...
+GITHUB_CLIENT_SECRET=...
+REDIRECT_URL=http://127.0.0.1:8080/oauth/callback
+```
+
+## Who Applies What
+
+| Stack | Applied by | Contents |
+|---|---|---|
+| `terraform_bootstrap/bootstrap` | administrator | registers the state bucket |
+| `terraform_gcp_storage` | administrator | APIs, Artifact Registry, runtime service account, secret container |
+| `terraform_bootstrap` | administrator | deployer service account, Workload Identity, deployer IAM |
+| `terraform_gcp_app` | GitHub Actions (`deploy.yml`) | Cloud Run service |
+| `terraform_gcp_edge` | administrator | public invoker binding, domain mapping |
+| `terraform_cf` | GitHub Actions (`deploy.yml`) | Cloudflare DNS record |
+
+The deployer can only roll out new revisions of the existing Cloud Run service; anything that changes IAM, APIs or secrets needs an administrator.
+
 ## Initial Infrastructure Setup
 
 Target Google Cloud project:
@@ -83,17 +118,28 @@ terraform apply -var-file=prod.tfvars
 cd ..
 ```
 
-Set this GitHub repository variable before using the workflows:
+Set these GitHub repository variables before using the workflows:
 
 - `WEBRTC_GITHUB_CLIENT_ID`
+- `WEBRTC_ALLOWED_GITHUB_IDS` (optional, see Configuration)
+
+The deploy job runs in the `production` environment, which the Workload Identity provider requires.
 
 Set this GitHub repository secret if Cloudflare DNS should be managed by GitHub Actions:
 
 - `CLOUDFLARE_API_TOKEN`
 
-### 7. App And DNS Stacks
+### 7. App, Edge And DNS Stacks
 
-Do not run these until an image exists in Artifact Registry.
+Do not run these until an image exists in Artifact Registry. After the first deploy creates the Cloud Run service, an administrator applies `terraform_gcp_edge` to make it public and map the domain:
+
+```bash
+cd terraform_gcp_edge
+terraform init
+terraform plan -var-file=prod.tfvars
+terraform apply -var-file=prod.tfvars
+cd ..
+```
 
 ```bash
 cd terraform_gcp_app

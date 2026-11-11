@@ -4,13 +4,6 @@ provider "google" {
   add_terraform_attribution_label = false
 }
 
-locals {
-  runtime_service_account_email = try(
-    data.terraform_remote_state.storage.outputs.webrtc_container_service_account_email,
-    "${data.google_project.current.number}-compute@developer.gserviceaccount.com",
-  )
-}
-
 resource "google_cloud_run_v2_service" "webrtc" {
   project  = var.project_id
   location = var.region
@@ -23,7 +16,9 @@ resource "google_cloud_run_v2_service" "webrtc" {
   }
 
   template {
-    service_account                  = local.runtime_service_account_email
+    # No fallback: running as the default compute account would silently grant
+    # the app project-wide permissions.
+    service_account                  = data.terraform_remote_state.storage.outputs.webrtc_container_service_account_email
     timeout                          = "3s"
     max_instance_request_concurrency = 128
     execution_environment            = "EXECUTION_ENVIRONMENT_GEN1"
@@ -66,19 +61,12 @@ resource "google_cloud_run_v2_service" "webrtc" {
         value = var.redirect_url
       }
 
-      env {
-        name  = "LOCAL_CLIENT_ID"
-        value = "local"
-      }
-
-      env {
-        name  = "LOCAL_CLIENT_SECRET"
-        value = "local"
-      }
-
-      env {
-        name  = "LOCAL_REDIRECT_URL"
-        value = "http://127.0.0.1:8080/oauth/callback"
+      dynamic "env" {
+        for_each = var.allowed_github_ids == "" ? [] : [var.allowed_github_ids]
+        content {
+          name  = "ALLOWED_GITHUB_IDS"
+          value = env.value
+        }
       }
 
       resources {
@@ -116,25 +104,21 @@ resource "google_cloud_run_v2_service" "webrtc" {
   }
 }
 
-resource "google_cloud_run_v2_service_iam_member" "public_invoker" {
-  project  = var.project_id
-  location = google_cloud_run_v2_service.webrtc.location
-  name     = google_cloud_run_v2_service.webrtc.name
-  role     = "roles/run.invoker"
-  member   = "allUsers"
+# Making the service public and mapping the domain need IAM and domain
+# permissions the deployer no longer has; terraform_gcp_edge owns them now.
+# These blocks drop them from this state without destroying them.
+removed {
+  from = google_cloud_run_v2_service_iam_member.public_invoker
+
+  lifecycle {
+    destroy = false
+  }
 }
 
-resource "google_cloud_run_domain_mapping" "webrtc" {
-  project  = data.google_project.current.number
-  location = var.region
-  name     = var.domain_name
+removed {
+  from = google_cloud_run_domain_mapping.webrtc
 
-  metadata {
-    namespace = data.google_project.current.number
-  }
-
-  spec {
-    route_name       = google_cloud_run_v2_service.webrtc.name
-    certificate_mode = "AUTOMATIC"
+  lifecycle {
+    destroy = false
   }
 }

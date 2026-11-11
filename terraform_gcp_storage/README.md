@@ -1,6 +1,6 @@
 # GCP Storage Terraform
 
-This stack manages base Google Cloud resources for `webrtc.duxca.com`:
+This stack manages base Google Cloud resources for `webrtc.duxca.com`. An administrator applies it; GitHub Actions does not.
 
 - required project APIs
 - Artifact Registry repository
