@@ -31,7 +31,7 @@ tokio = { version = "1", features = ["full"] }
 #tokio-stream = { version = "0.1", features = ["full"] }
 tower-cookies = { version = "0.11", features = ["signed"] }
 tower-http = { version = "0.7", features = ["trace", "compression-zstd", "fs", "set-header"] }
-tower-sessions = { version = "0.14", features = ["signed"] }
+tower-sessions = { version = "0.15", features = ["signed"] }
 #tower_governor = "0.7"
 tracing = "0.1"
 #tracing-futures = { version = "0.2.5", features = ["tokio"] }
