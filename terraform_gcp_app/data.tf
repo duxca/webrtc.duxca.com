@@ -1,7 +1,3 @@
-data "google_project" "current" {
-  project_id = var.project_id
-}
-
 data "terraform_remote_state" "storage" {
   backend = "gcs"
 

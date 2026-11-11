@@ -1,12 +1,8 @@
 # GCP App Terraform
 
-This stack manages the Cloud Run application resources:
+This stack manages the Cloud Run service and is applied by `deploy.yml` on every push to `main`. It reads the runtime service account from `../terraform_gcp_storage` via `terraform_remote_state` and fails if that output is missing.
 
-- Cloud Run service
-- public invoker IAM binding
-- Cloud Run domain mapping for `webrtc.duxca.com`
-
-It reads the runtime service account from `../terraform_gcp_storage` via `terraform_remote_state`.
+The public invoker binding and the domain mapping live in `../terraform_gcp_edge`, which an administrator applies, because the deployer has no permission to change IAM policies or domain mappings. The `removed` blocks in `main.tf` hand them over without destroying them.
 
 ## Usage
 

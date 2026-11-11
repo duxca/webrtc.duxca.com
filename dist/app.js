@@ -1,0 +1,424 @@
+"use strict";
+
+// entry point
+document.addEventListener("DOMContentLoaded", async (ev) => {
+    main();
+});
+
+// for debug
+const logarea = document.createElement("textarea");
+logarea.style = "display: block; width: 100%; height: 200px;";
+logarea.readonly = true;
+function consolelog(...args) {
+    console.log(...args);
+    logarea.appendChild(document.createTextNode(args.join(" ") + "\n"));
+}
+
+// for debug
+window.onerror = (message, source, lineno, colno, error) => {
+    consolelog(message, source, lineno, colno, error);
+    console.error(error);
+};
+// for debug
+window.addEventListener("unhandledrejection", (ev) => {
+    consolelog("Unhandledrejection", ev.reason.code, ev.reason.name, ev.reason.message, ev.reason.stack);
+    console.error(ev);
+});
+
+// for debug
+function addEventListeners(peer) {
+    peer.addEventListener("connectionstatechange", (_ev) => {
+        consolelog("onconnectionstatechange", peer.connectionState);
+    });
+    peer.addEventListener("datachannel", (ev) => {
+        const {
+            binaryType,
+            bufferedAmount,
+            id,
+            label,
+            maxPacketLifeTime,
+            maxRetransmits,
+            negotiated,
+            ordered,
+            protocol,
+            readyState,
+        } = ev.channel;
+        consolelog("ondatachannel", JSON.stringify({
+            binaryType,
+            bufferedAmount,
+            id,
+            label,
+            maxPacketLifeTime,
+            maxRetransmits,
+            negotiated,
+            ordered,
+            protocol,
+            readyState,
+        }, null, 2));
+        ev.channel.addEventListener("bufferedamountlow", (_ev) => {
+            consolelog("onbufferedamountlow", id, label);
+        });
+        ev.channel.addEventListener("close", (_ev) => {
+            consolelog("onclose", id, label);
+        });
+        ev.channel.addEventListener("closing", (_ev) => {
+            consolelog("onclosing", id, label);
+        });
+        ev.channel.addEventListener("error", (ev) => {
+            const err = ev.error;
+            consolelog("onerror",
+                err.message,
+                err.sdpLineNumber,
+                err.httpRequestStatusCode,
+                err.sctpCauseCode,
+                err.receivedAlert,
+                err.sentAlert,
+                err.errorDetail,
+                "    Error in file ",
+                err.filename,
+                " at line ",
+                err.lineNumber,
+                ", column ",
+                err.columnNumber,
+            );
+            console.error("onerror", id, label, err);
+        });
+        // ev.channel.addEventListener("message", (ev) => {
+        //     consolelog("onmessage", id, label, ev, ev.data);
+        // });
+        ev.channel.addEventListener("open", (_ev) => {
+            consolelog("onopen", id, label);
+        });
+
+    });
+    peer.addEventListener("icecandidate", (ev) => {
+        consolelog("onicecandidate", JSON.stringify(ev.candidate, null, 2));
+    });
+    peer.addEventListener("icecandidateerror", (ev) => {
+        consolelog("onicecandidateerror", JSON.stringify(ev, null, 2));
+        console.error("onicecandidateerror", ev);
+    });
+    peer.addEventListener("iceconnectionstatechange", (_ev) => {
+        consolelog("oniceconnectionstatechange", peer.iceConnectionState);
+    });
+    peer.addEventListener("icegatheringstatechange", (_ev) => {
+        consolelog("onicegatheringstatechange", peer.iceGatheringState);
+    });
+    peer.addEventListener("negotiationneeded", (_ev) => {
+        consolelog("onnegotiationneeded");
+    });
+    peer.addEventListener("signalingstatechange", (_ev) => {
+        consolelog("onsignalingstatechange", peer.signalingState);
+    });
+    peer.addEventListener("track", async (ev) => {
+        consolelog("ontrack", JSON.stringify(ev, null, 2));
+    });
+}
+
+async function main() {
+    let userId = await getMe();
+    if (userId == null) {
+        const form = document.createElement("form");
+        form.method = "POST";
+        form.action = "/login";
+        const button = document.createElement("input");
+        button.type = "submit";
+        button.value = "login";
+        form.appendChild(button);
+        document.body.appendChild(form);
+        return;
+    }
+    document.body.appendChild(logarea);
+    const form = document.createElement("form");
+    form.method = "POST";
+    form.action = "/logout";
+    const button = document.createElement("input");
+    button.type = "submit";
+    button.value = "logout";
+    form.appendChild(button);
+    document.body.appendChild(form);
+
+    const captureButton = document.createElement("button");
+    captureButton.appendChild(document.createTextNode("captureDesktop"));
+    document.body.appendChild(captureButton);
+    const recieveButton = document.createElement("button");
+    recieveButton.appendChild(document.createTextNode("recieveDesktop"));
+    document.body.appendChild(recieveButton);
+    const mode = await new Promise((resolve) => {
+        captureButton.onclick = () => resolve("capture");
+        recieveButton.onclick = () => resolve("recieve");
+    });
+    document.body.removeChild(captureButton);
+    document.body.removeChild(recieveButton);
+    if (mode === "capture") {
+        return captureVideo();
+    } else if (mode === "recieve") {
+        await receiveRtc();
+    }
+}
+
+async function captureVideo() {
+    // clear
+    await deleteValue("sdp-req");
+    await deleteValue("sdp-res");
+
+    consolelog("make Offer");
+    const peer = new RTCPeerConnection({
+        iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' }
+        ]
+    });
+    addEventListeners(peer);
+    consolelog("Adding local stream...");
+    const localStream = await navigator.mediaDevices.getDisplayMedia({
+        video: {
+            frameRate: 15,
+            displaySurface: "monitor",
+        },
+    });
+    peer.addStream(localStream);
+    await new Promise((resolve) => {
+        peer.onnegotiationneeded = () => resolve();
+    });
+    const choosableCodecs = RTCRtpSender.getCapabilities("video").codecs
+        .filter((codec) => codec.mimeType !== "video/red" && codec.mimeType !== "video/rtx" && codec.mimeType !== "video/ulpfec");
+    consolelog("choosableCodecs", JSON.stringify(choosableCodecs, null, 2));
+    if (RTCRtpTransceiver.prototype.setCodecPreferences instanceof Function) {
+        // filter firefox
+        const ul = document.createElement("ul");
+        for (const [i, codec] of choosableCodecs.entries()) {
+            const li = document.createElement("li");
+            const input = document.createElement("input");
+            input.type = "checkbox";
+            input.id = `codec-${i}`;
+            const label = document.createElement("label");
+            label.htmlFor = `codec-${i}`;
+            label.appendChild(document.createTextNode(JSON.stringify(codec)));
+            li.appendChild(input);
+            li.appendChild(label);
+            ul.appendChild(li);
+        }
+        document.body.appendChild(ul);
+        const codecButton = document.createElement("button");
+        codecButton.appendChild(document.createTextNode("choose codecs"));
+        document.body.appendChild(codecButton);
+        await new Promise((resolve) => { codecButton.onclick = resolve; });
+
+        // waiting for user selection
+
+        const codecPreferences = choosableCodecs.filter((_, i) => document.getElementById(`codec-${i}`).checked);
+        document.body.removeChild(ul);
+        document.body.removeChild(codecButton);
+        consolelog("codecPreferences", JSON.stringify(codecPreferences, null, 2));
+        const transceivers = peer.getTransceivers();
+        if (transceivers[0].sender.track.kind !== "video") {
+            throw new Error("Video track is not found.");
+        }
+        transceivers[0].setCodecPreferences(codecPreferences);
+    }
+    consolelog("createOffer()");
+    const localDescription = await peer.createOffer();
+    consolelog("createOffer() succsess in promise");
+    await peer.setLocalDescription(localDescription);
+    consolelog("setLocalDescription() succsess in promise");
+    await Promise.all([
+        new Promise((resolve) => {
+            peer.onicegatheringstatechange = (ev) => {
+                if (peer.iceGatheringState === "complete") {
+                    resolve();
+                }
+            };
+        }),
+        new Promise((resolve) => {
+            peer.onicecandidate = (ev) => {
+                if (ev.candidate != null) {
+                    // Trickle ICE の場合は、ICE candidateを相手に送る
+                    // Vanilla ICE の場合には、何もしない
+                } else {
+                    // Trickle ICE の場合は、何もしない
+                    // Vanilla ICE の場合には、ICE candidateを含んだSDPを相手に送る
+                    resolve();
+                }
+            };
+        })
+    ]);
+    const localSdpText = peer.localDescription.sdp
+    consolelog("---sending sdp ---");
+    consolelog(localSdpText);
+    await setValue("sdp-req", localSdpText);
+
+    // waiting for signalling
+    let remoteSdpText = null;
+    while (true) {
+        remoteSdpText = await getValue("sdp-res");
+        if (remoteSdpText != null) {
+            break;
+        }
+        await new Promise((resolve) => {
+            setTimeout(resolve, 3000);
+        });
+    }
+    consolelog("Received answer text...");
+    consolelog(remoteSdpText);
+    const answerSdp = new RTCSessionDescription({
+        type: "answer",
+        sdp: remoteSdpText,
+    });
+    await peer.setRemoteDescription(answerSdp);
+
+    // clear
+    await deleteValue("sdp-req");
+    await deleteValue("sdp-res");
+
+    consolelog("setRemoteDescription(answer) succsess in promise");
+    await new Promise((resolve) => {
+        peer.onconnectionstatechange = () => {
+            if (peer.connectionState === "disconnected") {
+                resolve();
+            }
+        };
+    });
+    consolelog("Hang up.");
+    peer.close();
+}
+
+async function receiveRtc() {
+    let remoteSdpText = null;
+    while (true) {
+        remoteSdpText = await getValue("sdp-req");
+        if (remoteSdpText != null) {
+            break;
+        }
+        await new Promise((resolve) => {
+            setTimeout(resolve, 3000);
+        });
+    }
+    // for debuging
+    const recvCodecs = RTCRtpReceiver.getCapabilities("video").codecs;
+    consolelog("recvCodecs", JSON.stringify(recvCodecs, null, 2));
+    consolelog("Received offer text...");
+    consolelog(remoteSdpText);
+    const offerSdp = new RTCSessionDescription({
+        type: "offer",
+        sdp: remoteSdpText,
+    });
+    const peer = new RTCPeerConnection({ iceServers: [] });
+    addEventListeners(peer);
+    const video = document.createElement("video");
+    peer.ontrack = (ev) => {
+        const remoteStream = ev.streams[0];
+        video.muted = true;
+        video.volume = 0;
+        video.autoplay = true;
+        video.playsinline = true;
+        video.controls = false;
+        video.srcObject = remoteStream;
+    };
+    await peer.setRemoteDescription(offerSdp);
+    consolelog("setRemoteDescription(offer) succsess in promise");
+    consolelog("sending Answer. Creating remote session description...");
+    const localDescription = await peer.createAnswer();
+    consolelog("createAnswer() succsess in promise");
+    await peer.setLocalDescription(localDescription);
+    consolelog("setLocalDescription() succsess in promise");
+    // -- Trickle ICE の場合は、初期SDPを相手に送る -- 
+    // -- Vanilla ICE の場合には、まだSDPは送らない --
+    //sendSdp(peerConnection.localDescription);
+    await new Promise((resolve) => {
+        peer.onicecandidate = (ev) => {
+            if (ev.candidate != null) {
+                // Trickle ICE の場合は、ICE candidateを相手に送る
+                // Vanilla ICE の場合には、何もしない
+            } else {
+                // Trickle ICE の場合は、何もしない
+                // Vanilla ICE の場合には、ICE candidateを含んだSDPを相手に送る
+                resolve();
+            }
+        };
+    });
+    const localSdpText = peer.localDescription.sdp;
+    consolelog("---sending sdp ---");
+    consolelog(localSdpText);
+    await setValue("sdp-res", localSdpText);
+
+    // waiting for signalling
+
+    await new Promise((resolve) => {
+        peer.onconnectionstatechange = () => {
+            if (peer.connectionState === "connected") {
+                resolve();
+            }
+        };
+    });
+    video.style = "display: block; width: 100%; height: auto; position: absolute; top: 0px; left: 0px;";
+    document.body.appendChild(video);
+    video.play();
+
+    // clear
+    await deleteValue("sdp-req");
+    await deleteValue("sdp-res");
+
+    await new Promise((resolve) => {
+        peer.onconnectionstatechange = () => {
+            if (peer.connectionState === "disconnected") {
+                resolve();
+            }
+        };
+    });
+    consolelog("Hang up.");
+    peer.close();
+    video.pause();
+    video.srcObject = null;
+    document.body.removeChild(video);
+}
+
+// Same-origin calls only: the server rejects cross-origin state-changing requests.
+async function callApi(body) {
+    return await fetch("/api", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+    });
+}
+
+async function getMe() {
+    const res = await callApi({ type: "GetMe" });
+    if (res.status === 401) {
+        return null;
+    }
+    if (res.status === 200) {
+        const body = await res.json();
+        return body.userId;
+    }
+    throw new Error(res.status);
+}
+
+// Slots ("sdp-req" / "sdp-res") always belong to the signed-in user.
+async function setValue(key, value) {
+    const res = await callApi({ type: "SetValue", key, value });
+    if (res.status === 200) {
+        return {};
+    }
+    throw new Error(res.status);
+}
+
+async function getValue(key) {
+    const res = await callApi({ type: "GetValue", key });
+    if (res.status === 200) {
+        const body = await res.json();
+        return body.value;
+    }
+    throw new Error(res.status);
+}
+
+async function deleteValue(key) {
+    const res = await callApi({ type: "DeleteValue", key });
+    if (res.status === 200) {
+        return {};
+    }
+    throw new Error(res.status);
+}

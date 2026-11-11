@@ -1,30 +1,13 @@
-#[derive(Clone, Default)]
-pub struct State {
-    pub db: std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<String, String>>>,
-}
+use axum::extract::rejection::JsonRejection;
+use axum::extract::{FromRequestParts, State};
+use axum::http::request::Parts;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response as HttpResponse};
+use axum::Json;
 
-pub struct Ise(anyhow::Error);
-
-impl axum::response::IntoResponse for Ise {
-    fn into_response(self) -> axum::response::Response {
-        log::error!("{:?}", self.0);
-        // TODO: 本番環では stack trace を表示しない
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Something went wrong: {:?}", self.0),
-        )
-            .into_response()
-    }
-}
-
-impl<E> From<E> for Ise
-where
-    E: Into<anyhow::Error>,
-{
-    fn from(err: E) -> Self {
-        Self(err.into())
-    }
-}
+use crate::app::AppState;
+use crate::auth::{self, User};
+use crate::signaling::SetError;
 
 pub mod get_me {
     #[derive(Debug, serde::Deserialize, serde::Serialize, Clone, PartialEq)]
@@ -39,10 +22,12 @@ pub mod get_me {
 }
 
 pub mod set_value {
+    use crate::signaling::Slot;
+
     #[derive(Debug, serde::Deserialize, serde::Serialize, Clone, PartialEq)]
     #[serde(rename_all = "camelCase")]
     pub struct Request {
-        pub key: String,
+        pub key: Slot,
         pub value: String,
     }
 
@@ -51,10 +36,12 @@ pub mod set_value {
     pub struct Response {}
 }
 pub mod get_value {
+    use crate::signaling::Slot;
+
     #[derive(Debug, serde::Deserialize, serde::Serialize, Clone, PartialEq)]
     #[serde(rename_all = "camelCase")]
     pub struct Request {
-        pub key: String,
+        pub key: Slot,
     }
 
     #[derive(Debug, serde::Deserialize, serde::Serialize, Clone, PartialEq, Eq)]
@@ -64,10 +51,12 @@ pub mod get_value {
     }
 }
 pub mod delete_value {
+    use crate::signaling::Slot;
+
     #[derive(Debug, serde::Deserialize, serde::Serialize, Clone, PartialEq)]
     #[serde(rename_all = "camelCase")]
     pub struct Request {
-        pub key: String,
+        pub key: Slot,
     }
 
     #[derive(Debug, serde::Deserialize, serde::Serialize, Clone, PartialEq, Eq)]
@@ -116,71 +105,93 @@ pub enum Response {
 #[serde(tag = "errorType")]
 #[serde(rename_all = "PascalCase")]
 pub enum ErrorKind {
-    PermissionDenied,
+    Unauthenticated,
     InvalidRequest,
+    ValueTooLarge,
+    StoreFull,
+    RateLimited,
 }
 
-impl Request {
-    #[allow(dead_code)]
-    pub fn to_request_type_string(&self) -> Result<String, anyhow::Error> {
-        use anyhow::Context;
-        let json = serde_json::to_value(self)?;
-        let json = json.pointer(".type").context("type field not found")?;
-        let txt = json.as_str().context("type field is not a string")?;
-        Ok(txt.to_string())
-    }
+fn error(status: StatusCode, kind: ErrorKind) -> HttpResponse {
+    (status, Json(Response::Error(kind))).into_response()
 }
 
-impl Response {
-    #[allow(dead_code)]
-    pub fn to_response_type_string(&self) -> Result<String, anyhow::Error> {
-        use anyhow::Context;
-        let json = serde_json::to_value(self)?;
-        let json = json.pointer(".type").context("type field not found")?;
-        let txt = json.as_str().context("type field is not a string")?;
-        Ok(txt.to_string())
+/// Signed-in caller of `/api`. As a parts extractor it runs before the body is
+/// read, so unauthenticated or throttled requests never get their body parsed.
+pub struct ApiCaller(User);
+
+impl FromRequestParts<AppState> for ApiCaller {
+    type Rejection = HttpResponse;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        app: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let user = auth::current_user(parts, app.settings.session_max_age)
+            .await
+            .map_err(IntoResponse::into_response)?;
+        let Some(user) = user else {
+            return Err(error(StatusCode::UNAUTHORIZED, ErrorKind::Unauthenticated));
+        };
+        if !app.api_limiter.check(user.id) {
+            return Err(error(StatusCode::TOO_MANY_REQUESTS, ErrorKind::RateLimited));
+        }
+        Ok(Self(user))
     }
 }
 
 /// POST /api
-#[tracing::instrument(level = "trace", skip(st))]
+///
+/// Every slot is addressed relative to the caller, so one user can never read
+/// or overwrite another user's signaling data.
 pub async fn api(
-    auth_session: axum_login::AuthSession<crate::auth::Backend>,
-    axum::extract::State(ref st): axum::extract::State<crate::web::State>,
-    axum::extract::Json(json): axum::extract::Json<serde_json::Value>,
-) -> Result<impl axum::response::IntoResponse, crate::web::Ise> {
-    use axum::response::IntoResponse;
-    let user = auth_session.user;
-    let Some(user) = user else {
-        return Ok((axum::http::StatusCode::UNAUTHORIZED, "401").into_response());
-    };
-    let Ok(req) = serde_json::from_value::<Request>(json) else {
-        return Ok((axum::http::StatusCode::BAD_REQUEST, "invalid request").into_response());
+    ApiCaller(user): ApiCaller,
+    State(app): State<AppState>,
+    body: Result<Json<Request>, JsonRejection>,
+) -> HttpResponse {
+    let req = match body {
+        Ok(Json(req)) => req,
+        Err(rejection) => return error(rejection.status(), ErrorKind::InvalidRequest),
     };
     let res: Response = match req {
-        Request::GetMe(get_me::Request {}) => {
-            let res = get_me::Response {
-                user_id: user.user_id,
-            };
-            res.into()
-        }
+        Request::GetMe(get_me::Request {}) => get_me::Response { user_id: user.id }.into(),
         Request::SetValue(set_value::Request { key, value }) => {
-            let mut lock = st.db.lock().await;
-            lock.insert(key, value);
-            set_value::Response {}.into()
+            match app.signaling.set(user.id, key, value) {
+                Ok(()) => set_value::Response {}.into(),
+                Err(SetError::ValueTooLarge) => {
+                    return error(StatusCode::PAYLOAD_TOO_LARGE, ErrorKind::ValueTooLarge)
+                }
+                Err(SetError::StoreFull) => {
+                    return error(StatusCode::SERVICE_UNAVAILABLE, ErrorKind::StoreFull)
+                }
+            }
         }
-        Request::GetValue(get_value::Request { key }) => {
-            let lock = st.db.lock().await;
-            let value = lock.get(&key).cloned();
-            let res = get_value::Response { value };
-            res.into()
+        Request::GetValue(get_value::Request { key }) => get_value::Response {
+            value: app.signaling.get(user.id, key),
         }
+        .into(),
         Request::DeleteValue(delete_value::Request { key }) => {
-            let mut lock = st.db.lock().await;
-            lock.remove(&key);
+            app.signaling.delete(user.id, key);
             delete_value::Response {}.into()
         }
     };
-    let json = serde_json::to_value(res)?;
-    Ok(axum::response::Json::from(json).into_response())
+    Json(res).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::signaling::Slot;
+
+    #[test]
+    fn keys_are_slot_names_only() {
+        let req: Request = serde_json::from_str(r#"{"type":"GetValue","key":"sdp-res"}"#).unwrap();
+        assert_eq!(
+            req,
+            Request::GetValue(get_value::Request { key: Slot::SdpRes })
+        );
+        assert!(
+            serde_json::from_str::<Request>(r#"{"type":"GetValue","key":"sdp-res-1"}"#).is_err()
+        );
+    }
 }

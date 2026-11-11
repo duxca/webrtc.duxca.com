@@ -1,22 +1,32 @@
+mod app;
 mod auth;
+mod error;
+mod rate_limit;
+mod security;
+mod session_store;
+mod signaling;
+#[cfg(test)]
+mod tests;
 mod web;
 
-#[derive(serde::Deserialize, Debug)]
+#[cfg(all(feature = "local", not(debug_assertions)))]
+compile_error!(
+    "the `local` feature turns off Secure cookies and HSTS; never build a release with it"
+);
+
+#[derive(serde::Deserialize)]
 struct Config {
     host_addr: String,
     github_client_id: oauth2::ClientId,
     github_client_secret: oauth2::ClientSecret,
     redirect_url: oauth2::RedirectUrl,
-    local_client_id: oauth2::ClientId,
-    local_client_secret: oauth2::ClientSecret,
-    local_redirect_url: oauth2::RedirectUrl,
+    /// Comma-separated GitHub user ids. Unset or empty keeps sign-in open.
+    allowed_github_ids: Option<String>,
 }
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), anyhow::Error> {
-    shadow_rs::shadow!(build);
     dotenvy::dotenv().ok();
-    //env_logger::init();
     tracing_subscriber::fmt()
         .with_timer(tracing_subscriber::fmt::time::LocalTime::rfc_3339())
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -26,67 +36,23 @@ async fn main() -> Result<(), anyhow::Error> {
         .with_thread_ids(true)
         .init();
     let config = envy::from_env::<Config>()?;
-    log::debug!("config: {:#?}", config);
 
-    let session_store = tower_sessions::MemoryStore::default();
-
-    // cookie のセッションの設定
-    let mut session_layer = tower_sessions::SessionManagerLayer::new(session_store)
-        // oauth でリダイレクトするときにStrict だとエラーになる
-        .with_same_site(tower_sessions::cookie::SameSite::Lax)
-        .with_expiry(tower_sessions::Expiry::OnInactivity(
-            std::time::Duration::from_secs(60 * 60 * 24).try_into()?,
-        ));
-    if cfg!(not(feature = "local")) {
-        // 本番環境で有効にする
-        session_layer = session_layer.with_secure(true).with_http_only(true);
+    let allowlist = auth::Allowlist::parse(config.allowed_github_ids.as_deref())?;
+    match allowlist.allowed_count() {
+        Some(count) => tracing::info!(count, "sign-in restricted to ALLOWED_GITHUB_IDS"),
+        None => tracing::info!("sign-in open to every GitHub account"),
     }
-    let (client_token, redirect_url) = if cfg!(feature = "local") {
-        (
-            crate::auth::ClientToken {
-                client_id: config.local_client_id.clone(),
-                client_secret: config.local_client_secret.clone(),
-            },
-            config.local_redirect_url,
-        )
-    } else {
-        (
-            crate::auth::ClientToken {
-                client_id: config.github_client_id.clone(),
-                client_secret: config.github_client_secret.clone(),
-            },
-            config.redirect_url,
-        )
+    let oauth = auth::OAuthSettings {
+        client_id: config.github_client_id,
+        client_secret: config.github_client_secret,
+        redirect_url: config.redirect_url,
+        endpoints: auth::GitHubEndpoints::github_com(),
     };
-    let state = web::State::default();
-    let backend = crate::auth::Backend::new(client_token, redirect_url);
+    let app = app::build(oauth, allowlist, app::Settings::default())?;
+    app.sessions
+        .spawn_purger(std::time::Duration::from_secs(60));
 
-    let app = axum::Router::new()
-        .route("/api", axum::routing::post(crate::web::api))
-        .route(
-            "/version",
-            axum::routing::get(|| async { build::CLAP_LONG_VERSION }),
-        )
-        .route("/login", axum::routing::post(crate::auth::login))
-        .route("/logout", axum::routing::post(crate::auth::logout))
-        .route("/oauth/callback", axum::routing::get(crate::auth::callback))
-        .layer(axum_login::AuthManagerLayerBuilder::new(backend, session_layer).build())
-        .layer(
-            tower_http::cors::CorsLayer::very_permissive(), // .allow_credentials(true)
-                                                            // .allow_methods(tower_http::cors::Any)
-                                                            // .allow_origin(tower_http::cors::Any),
-        )
-        // .layer(tower_governor::GovernorLayer {
-        //     config: governor_conf,
-        // })
-        .fallback_service(tower_http::services::ServeDir::new("dist"))
-        .layer(tower_http::trace::TraceLayer::new_for_http())
-        .layer(tower_http::compression::CompressionLayer::new())
-        .with_state(state);
-
-    let listener = tokio::net::TcpListener::bind(config.host_addr).await?;
-
-    axum::serve(listener, app).await?;
-
+    let listener = tokio::net::TcpListener::bind(&config.host_addr).await?;
+    axum::serve(listener, app.router).await?;
     Ok(())
 }

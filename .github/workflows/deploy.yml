@@ -19,43 +19,57 @@ concurrency:
   group: deploy-main
   cancel-in-progress: false
 
+permissions: {}
+
+# Third-party actions are pinned to full commit SHAs; Dependabot proposes updates.
 jobs:
-  deploy:
+  # Runs dependency build scripts, so it gets no cloud credentials.
+  test:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 30
     permissions:
       contents: read
-      id-token: write
     steps:
-    - uses: actions/checkout@v6
-    - uses: dtolnay/rust-toolchain@stable
-    - uses: Swatinem/rust-cache@v2
+    - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      with:
+        persist-credentials: false
+    - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      with:
+        toolchain: stable
+    - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       with:
         shared-key: ${{ env.RUST_CACHE_SHARED_KEY }}
     - name: Run unit tests
       run: cargo test
-    - uses: google-github-actions/auth@v3
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    # The Workload Identity provider only accepts tokens from this environment.
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+    - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      with:
+        persist-credentials: false
+    - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
       with:
         workload_identity_provider: projects/${{ env.PROJECT_NUMBER }}/locations/global/workloadIdentityPools/${{ env.POOL_ID }}/providers/${{ env.PROVIDER_ID }}
         project_id: ${{ env.PROJECT_ID }}
         service_account: ${{ env.SERVICE_ACCOUNT }}
-    - uses: google-github-actions/setup-gcloud@v3
-    - uses: hashicorp/setup-terraform@v4
+    - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+    - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
       with:
         terraform_version: 1.15.5
         terraform_wrapper: false
-    - name: Terraform Apply GCP Storage
-      working-directory: ./terraform_gcp_storage
-      run: |
-        set -euo pipefail
-        timeout 5m terraform init
-        timeout 10m terraform plan -out=tfplan -var-file=prod.tfvars
-        timeout 20m terraform apply -auto-approve tfplan
     - run: gcloud auth configure-docker asia-northeast1-docker.pkg.dev
-    - uses: docker/setup-buildx-action@v4
+    - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
     - name: Build and push image
       id: build
-      uses: docker/build-push-action@v7
+      uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
       with:
         context: .
         push: true
@@ -64,22 +78,27 @@ jobs:
         cache-to: type=gha,mode=max,scope=runtime-image
     - name: Resolve pushed image digest
       id: image
+      env:
+        DIGEST: ${{ steps.build.outputs.digest }}
       run: |
         set -euo pipefail
-        image="${{ env.IMAGE_REPOSITORY }}@${{ steps.build.outputs.digest }}"
+        image="${IMAGE_REPOSITORY}@${DIGEST}"
         echo "image=${image}" >> "${GITHUB_OUTPUT}"
         echo "Pushed ${image}"
     - name: Verify Secret Manager versions
+      # Metadata only: the deployer cannot read secret values.
       run: |
         set -euo pipefail
-        gcloud secrets versions access 1 \
+        gcloud secrets versions describe latest \
           --project="${PROJECT_ID}" \
-          --secret="WEBRTC_GITHUB_CLIENT_SECRET" >/dev/null
+          --secret="WEBRTC_GITHUB_CLIENT_SECRET" \
+          --format='value(state)' | grep -qx ENABLED
     - name: Terraform Apply GCP App
       working-directory: ./terraform_gcp_app
       env:
         CONTAINER_IMAGE: ${{ steps.image.outputs.image }}
         TF_VAR_github_client_id: ${{ vars.WEBRTC_GITHUB_CLIENT_ID }}
+        TF_VAR_allowed_github_ids: ${{ vars.WEBRTC_ALLOWED_GITHUB_IDS }}
       run: |
         set -euo pipefail
         : "${TF_VAR_github_client_id:?Set repository variable WEBRTC_GITHUB_CLIENT_ID}"

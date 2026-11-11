@@ -1,9 +1,7 @@
-target/
-.github
-.git
-.terraform
-terraform/
-terraform_*/.terraform/
-terraform_*/tfplan
-*.tfstate
-*.tfstate.*
+# Allowlist: only what the build needs enters the context, so local secrets
+# (.env, *.tfstate) and CI credential files (gha-creds-*.json) never do.
+*
+!Cargo.toml
+!Cargo.lock
+!src/
+!dist/
