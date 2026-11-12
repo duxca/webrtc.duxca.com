@@ -137,6 +137,7 @@ async function main() {
     button.value = "logout";
     form.appendChild(button);
     document.body.appendChild(form);
+    document.body.appendChild(createTokenPanel());
 
     const captureButton = document.createElement("button");
     captureButton.appendChild(document.createTextNode("captureDesktop"));
@@ -370,6 +371,92 @@ async function receiveRtc() {
     video.pause();
     video.srcObject = null;
     document.body.removeChild(video);
+}
+
+// API tokens let non-browser clients (e.g. a camera device) use the signaling
+// keys of this account with `Authorization: Bearer <token>`.
+function createTokenPanel() {
+    const panel = document.createElement("fieldset");
+    const legend = document.createElement("legend");
+    legend.appendChild(document.createTextNode("API tokens"));
+    panel.appendChild(legend);
+
+    const note = document.createElement("p");
+    note.appendChild(document.createTextNode(
+        "Tokens are kept in server memory and are lost when the server restarts or is redeployed."));
+    panel.appendChild(note);
+
+    const label = document.createElement("input");
+    label.type = "text";
+    label.maxLength = 64;
+    label.placeholder = "label";
+    panel.appendChild(label);
+    const create = document.createElement("button");
+    create.appendChild(document.createTextNode("create token"));
+    panel.appendChild(create);
+
+    // The plaintext token is only ever shown here, right after creation.
+    const issued = document.createElement("p");
+    panel.appendChild(issued);
+    const list = document.createElement("ul");
+    panel.appendChild(list);
+
+    async function refresh() {
+        const res = await fetch("/api/tokens", {
+            credentials: "same-origin",
+            headers: { "Accept": "application/json" },
+        });
+        if (res.status !== 200) {
+            throw new Error(res.status);
+        }
+        const { tokens } = await res.json();
+        list.replaceChildren(...tokens.map((token) => {
+            const item = document.createElement("li");
+            const created = new Date(token.createdAt * 1000).toISOString();
+            item.appendChild(document.createTextNode(`${token.label} (created ${created}) `));
+            const revoke = document.createElement("button");
+            revoke.appendChild(document.createTextNode("revoke"));
+            revoke.onclick = async () => {
+                const res = await fetch(`/api/tokens/${encodeURIComponent(token.id)}`, {
+                    method: "DELETE",
+                    credentials: "same-origin",
+                });
+                if (res.status !== 204 && res.status !== 404) {
+                    throw new Error(res.status);
+                }
+                await refresh();
+            };
+            item.appendChild(revoke);
+            return item;
+        }));
+    }
+
+    create.onclick = async () => {
+        const res = await fetch("/api/tokens", {
+            method: "POST",
+            credentials: "same-origin",
+            headers: {
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ label: label.value }),
+        });
+        if (res.status !== 201) {
+            issued.replaceChildren(document.createTextNode(`token creation failed (${res.status})`));
+            return;
+        }
+        const body = await res.json();
+        const code = document.createElement("code");
+        code.appendChild(document.createTextNode(body.token));
+        issued.replaceChildren(
+            document.createTextNode(`Copy the token for "${body.label}" now; it will not be shown again: `),
+            code);
+        label.value = "";
+        await refresh();
+    };
+
+    refresh();
+    return panel;
 }
 
 // Same-origin calls only: the server rejects cross-origin state-changing requests.

@@ -15,6 +15,39 @@ Rust WebRTC signaling server deployed to Cloud Run.
 
 In production `ALLOWED_GITHUB_IDS` comes from the repository variable `WEBRTC_ALLOWED_GITHUB_IDS`.
 
+## Signaling API
+
+`POST /api` takes a JSON body with a `type` field:
+
+| `type` | Body | Auth |
+|---|---|---|
+| `GetMe` | `{}` | session only |
+| `SetValue` | `{"key": "...", "value": "..."}` | session or bearer token |
+| `GetValue` | `{"key": "..."}` → `{"value": "..." \| null}` | session or bearer token |
+| `DeleteValue` | `{"key": "..."}` | session or bearer token |
+
+Keys are free-form strings (1–256 bytes, no whitespace or control characters), e.g. `sdp-req` or `aicast-webrtc/<room>/offer`. Every key lives in its owner's namespace: the owner is the signed-in user, or the user who issued the bearer token. A session and that user's tokens therefore share the same keys, and nobody else can read or write them. Limits: values ≤ 32 KiB, entries expire after 15 minutes, at most 64 keys per owner and 1024 in total.
+
+### API tokens (non-browser clients)
+
+Devices without a browser session (e.g. an Actcast app on a camera) call `/api` with `Authorization: Bearer <token>`. Create tokens from the "API tokens" panel on the page after signing in, or with these session-only endpoints (a bearer token cannot manage tokens):
+
+| Method and path | Body | Response |
+|---|---|---|
+| `POST /api/tokens` | `{"label": "kitchen camera"}` (1–64 characters) | `201 {"id", "label", "createdAt", "token"}`; the plaintext `token` is returned only here |
+| `GET /api/tokens` | | `200 {"tokens": [{"id", "label", "createdAt"}]}` (caller's tokens only) |
+| `DELETE /api/tokens/{id}` | | `204`, or `404` if the id is not one of the caller's tokens |
+
+`createdAt` is Unix seconds. A token is `wrtc_` followed by 64 hex characters (32 random bytes). The server keeps only its SHA-256 and compares it in constant time. A revoked token stops working immediately; signing out does not revoke tokens. At most 20 tokens per user.
+
+```bash
+curl -sS https://webrtc.duxca.com/api \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"type":"GetValue","key":"aicast-webrtc/<room>/offer"}'
+```
+
+**Tokens are kept in memory**, like sessions and signaling entries: a restart or redeploy (every merge to `main`) drops them all, and devices need a newly issued token afterwards.
+
 ## Local Development
 
 Register a separate GitHub OAuth app whose callback is `http://127.0.0.1:8080/oauth/callback`, put its values in `.env`, then run `./run_local.bash`. The `local` feature drops the `Secure` flag and `__Host-` prefix from cookies so they work over plain HTTP; it refuses to compile in release builds.

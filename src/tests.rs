@@ -23,6 +23,7 @@ use crate::auth::{self, Allowlist, GitHubEndpoints, OAuthSettings};
 use crate::rate_limit::Quota;
 use crate::session_store::BoundedMemoryStore;
 use crate::signaling;
+use crate::tokens;
 
 const PUBLIC_ORIGIN: &str = "http://127.0.0.1:8080";
 /// The fake `/user` endpoint fails for this login with a body that must not
@@ -159,7 +160,7 @@ async fn harness(allowlist: Allowlist, settings: Settings) -> Harness {
 fn request(method: Method, uri: &str) -> axum::http::request::Builder {
     let builder = Request::builder().method(method.clone()).uri(uri);
     // What a browser sends for a fetch or form post from our own page.
-    if method == Method::POST {
+    if method != Method::GET && method != Method::HEAD {
         builder.header("sec-fetch-site", "same-origin")
     } else {
         builder
@@ -262,6 +263,56 @@ impl Harness {
     }
 }
 
+/// What a device sends: no cookies, no Fetch Metadata, no Origin.
+fn bearer_request(token: &str, body: &Value) -> Request<Body> {
+    Request::builder()
+        .method(Method::POST)
+        .uri("/api")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(json_body(body))
+        .unwrap()
+}
+
+impl Harness {
+    async fn device(&self, token: &str, body: Value) -> Reply {
+        self.send(&mut Browser::default(), bearer_request(token, &body))
+            .await
+    }
+
+    async fn create_token(&self, browser: &mut Browser, label: &str) -> Reply {
+        let req = request(Method::POST, "/api/tokens")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(json_body(&json!({ "label": label })))
+            .unwrap();
+        self.send(browser, req).await
+    }
+
+    async fn issued_token(&self, browser: &mut Browser, label: &str) -> (String, String) {
+        let res = self.create_token(browser, label).await;
+        assert_eq!(res.status, StatusCode::CREATED, "{}", res.text());
+        let body = res.json();
+        (
+            body["token"].as_str().unwrap().to_owned(),
+            body["id"].as_str().unwrap().to_owned(),
+        )
+    }
+
+    async fn list_tokens(&self, browser: &mut Browser) -> Reply {
+        let req = request(Method::GET, "/api/tokens")
+            .body(Body::empty())
+            .unwrap();
+        self.send(browser, req).await
+    }
+
+    async fn revoke_token(&self, browser: &mut Browser, id: &str) -> StatusCode {
+        let req = request(Method::DELETE, &format!("/api/tokens/{id}"))
+            .body(Body::empty())
+            .unwrap();
+        self.send(browser, req).await.status
+    }
+}
+
 async fn open_harness() -> Harness {
     harness(Allowlist::default(), Settings::default()).await
 }
@@ -322,15 +373,15 @@ async fn h1_signaling_slots_belong_to_the_signed_in_user() {
         .await;
     assert_eq!(res.json()["value"], "offer-from-alice");
 
-    // The old key format that embedded a user id is refused.
+    // Naming Alice's id in a key is just another key in Mallory's namespace.
     let res = h
         .api(
             &mut mallory,
             json!({"type": "GetValue", "key": "sdp-req-1"}),
         )
         .await;
-    assert_eq!(res.status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(res.json()["errorType"], "InvalidRequest");
+    assert_eq!(res.status, StatusCode::OK);
+    assert_eq!(res.json()["value"], Value::Null);
 
     let res = h.api(&mut mallory, json!({"type": "GetMe"})).await;
     assert_eq!(res.json(), json!({"type": "GetMe", "userId": 2}));
@@ -682,4 +733,397 @@ async fn i3_version_reports_only_the_package_version() {
         .await;
     assert_eq!(res.status, StatusCode::OK);
     assert_eq!(res.text(), env!("CARGO_PKG_VERSION"));
+}
+
+const ROOM: &str = "aicast-webrtc/9f1c2e7a4b6d";
+
+fn key(suffix: &str) -> String {
+    format!("{ROOM}/{suffix}")
+}
+
+#[tokio::test]
+async fn bearer_token_sets_gets_and_deletes_free_form_keys() {
+    let h = open_harness().await;
+    let mut alice = h.signed_in(1, "alice").await;
+    let (token, _) = h.issued_token(&mut alice, "camera").await;
+    assert!(token.starts_with(tokens::TOKEN_PREFIX), "{token}");
+
+    let offer = format!(
+        "v=0\r\n{}",
+        "a=candidate:1 1 udp 2122260223 192.0.2.1 54321 typ host\r\n".repeat(60)
+    );
+    assert!(offer.len() > 3 * 1024);
+    let res = h
+        .device(
+            &token,
+            json!({"type": "SetValue", "key": key("offer"), "value": offer}),
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.text());
+    for suffix in ["answer", "cand-pub", "cand-view", "hello"] {
+        let res = h
+            .device(
+                &token,
+                json!({"type": "SetValue", "key": key(suffix), "value": suffix}),
+            )
+            .await;
+        assert_eq!(res.status, StatusCode::OK);
+    }
+
+    let res = h
+        .device(&token, json!({"type": "GetValue", "key": key("offer")}))
+        .await;
+    assert_eq!(res.json(), json!({"type": "GetValue", "value": offer}));
+    // The owner's browser session shares the namespace with the owner's devices.
+    let res = h
+        .api(
+            &mut alice,
+            json!({"type": "GetValue", "key": key("cand-pub")}),
+        )
+        .await;
+    assert_eq!(res.json()["value"], "cand-pub");
+
+    let res = h
+        .device(&token, json!({"type": "DeleteValue", "key": key("offer")}))
+        .await;
+    assert_eq!(res.status, StatusCode::OK);
+    let res = h
+        .device(&token, json!({"type": "GetValue", "key": key("offer")}))
+        .await;
+    assert_eq!(res.json()["value"], Value::Null);
+}
+
+#[tokio::test]
+async fn missing_invalid_unknown_and_revoked_tokens_are_rejected() {
+    let h = open_harness().await;
+    let mut alice = h.signed_in(1, "alice").await;
+    let (token, id) = h.issued_token(&mut alice, "camera").await;
+    let get = json!({"type": "GetValue", "key": key("offer")});
+
+    let anonymous = Request::builder()
+        .method(Method::POST)
+        .uri("/api")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(json_body(&get))
+        .unwrap();
+    let res = h.send(&mut Browser::default(), anonymous).await;
+    assert_eq!(res.status, StatusCode::UNAUTHORIZED);
+
+    let unknown = format!("{}{}", tokens::TOKEN_PREFIX, "0".repeat(64));
+    for bad in [
+        "garbage",
+        token.trim_start_matches(tokens::TOKEN_PREFIX),
+        unknown.as_str(),
+    ] {
+        let res = h.device(bad, get.clone()).await;
+        assert_eq!(res.status, StatusCode::UNAUTHORIZED, "{bad}");
+        assert_eq!(res.json()["errorType"], "Unauthenticated");
+    }
+    let basic = Request::builder()
+        .method(Method::POST)
+        .uri("/api")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, "Basic YWxpY2U6c2VjcmV0")
+        .body(json_body(&get))
+        .unwrap();
+    assert_eq!(
+        h.send(&mut Browser::default(), basic).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+
+    // A bad Authorization header does not fall back to the session cookie.
+    let res = h.send(&mut alice, bearer_request("garbage", &get)).await;
+    assert_eq!(res.status, StatusCode::UNAUTHORIZED);
+    let mut not_bearer = bearer_request("unused", &get);
+    not_bearer.headers_mut().insert(
+        header::AUTHORIZATION,
+        "Basic YWxpY2U6c2VjcmV0".parse().unwrap(),
+    );
+    assert_eq!(
+        h.send(&mut alice, not_bearer).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+
+    // Rejected before the (oversized) body is read.
+    let huge = json!({"type": "SetValue", "key": key("offer"), "value": "x".repeat(1024 * 1024)});
+    assert_eq!(
+        h.device(&unknown, huge).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+
+    assert_eq!(h.device(&token, get.clone()).await.status, StatusCode::OK);
+    assert_eq!(
+        h.revoke_token(&mut alice, &id).await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(h.device(&token, get).await.status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn get_me_requires_a_session() {
+    let h = open_harness().await;
+    let mut alice = h.signed_in(1, "alice").await;
+    let (token, _) = h.issued_token(&mut alice, "camera").await;
+    let res = h.device(&token, json!({"type": "GetMe"})).await;
+    assert_eq!(res.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(res.json()["errorType"], "Unauthenticated");
+    let res = h.api(&mut alice, json!({"type": "GetMe"})).await;
+    assert_eq!(res.json(), json!({"type": "GetMe", "userId": 1}));
+}
+
+#[tokio::test]
+async fn token_management_is_per_user_and_session_only() {
+    let h = open_harness().await;
+    let mut alice = h.signed_in(1, "alice").await;
+    let mut bob = h.signed_in(2, "bob").await;
+    let (token, id) = h.issued_token(&mut alice, "kitchen camera").await;
+
+    let res = h.list_tokens(&mut alice).await;
+    assert_eq!(res.status, StatusCode::OK);
+    assert_eq!(res.header("cache-control"), Some("no-store"));
+    let listed = res.json();
+    let entries = listed["tokens"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    let fields: Vec<&str> = entries[0]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(fields, ["createdAt", "id", "label"]);
+    assert_eq!(entries[0]["id"], id.as_str());
+    assert_eq!(entries[0]["label"], "kitchen camera");
+    assert!(entries[0]["createdAt"].as_u64().unwrap() > 0);
+    let secret = token.trim_start_matches(tokens::TOKEN_PREFIX);
+    let hash: String = Sha256::digest(token.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    for leaked in [secret, hash.as_str()] {
+        assert!(!res.text().contains(leaked));
+    }
+
+    let res = h.list_tokens(&mut bob).await;
+    assert_eq!(res.json(), json!({"tokens": []}));
+    assert_eq!(h.revoke_token(&mut bob, &id).await, StatusCode::NOT_FOUND);
+    assert_eq!(
+        h.device(&token, json!({"type": "GetValue", "key": "k"}))
+            .await
+            .status,
+        StatusCode::OK,
+        "Bob's revoke attempt must not affect Alice's token"
+    );
+
+    // A bearer token cannot manage tokens.
+    let with_bearer = |method: Method, uri: &str, body: Body| {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(body)
+            .unwrap()
+    };
+    for req in [
+        with_bearer(
+            Method::POST,
+            "/api/tokens",
+            json_body(&json!({"label": "x"})),
+        ),
+        with_bearer(Method::GET, "/api/tokens", Body::empty()),
+        with_bearer(Method::DELETE, &format!("/api/tokens/{id}"), Body::empty()),
+    ] {
+        let res = h.send(&mut Browser::default(), req).await;
+        assert_eq!(res.status, StatusCode::UNAUTHORIZED);
+    }
+
+    // Token management from another origin is refused like any state change.
+    let cross_site = Request::builder()
+        .method(Method::POST)
+        .uri("/api/tokens")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("sec-fetch-site", "same-site")
+        .body(json_body(&json!({"label": "x"})))
+        .unwrap();
+    assert_eq!(
+        h.send(&mut alice, cross_site).await.status,
+        StatusCode::FORBIDDEN
+    );
+
+    assert_eq!(
+        h.revoke_token(&mut alice, &id).await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        h.list_tokens(&mut alice).await.json(),
+        json!({"tokens": []})
+    );
+    assert_eq!(h.revoke_token(&mut alice, &id).await, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn token_labels_are_validated() {
+    let h = open_harness().await;
+    let mut alice = h.signed_in(1, "alice").await;
+    for bad in [
+        json!({"label": "  "}),
+        json!({"label": "x".repeat(65)}),
+        json!({}),
+    ] {
+        let req = request(Method::POST, "/api/tokens")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(json_body(&bad))
+            .unwrap();
+        let res = h.send(&mut alice, req).await;
+        assert_eq!(res.status, StatusCode::UNPROCESSABLE_ENTITY, "{bad}");
+    }
+    assert_eq!(
+        h.list_tokens(&mut alice).await.json(),
+        json!({"tokens": []})
+    );
+}
+
+#[tokio::test]
+async fn owners_are_isolated_with_free_form_keys() {
+    let h = open_harness().await;
+    let mut alice = h.signed_in(1, "alice").await;
+    let mut bob = h.signed_in(2, "bob").await;
+    let (alice_token, _) = h.issued_token(&mut alice, "camera").await;
+    let (bob_token, _) = h.issued_token(&mut bob, "camera").await;
+    let shared = key("offer");
+
+    h.device(
+        &alice_token,
+        json!({"type": "SetValue", "key": shared, "value": "alice-device"}),
+    )
+    .await;
+    h.api(
+        &mut bob,
+        json!({"type": "SetValue", "key": shared, "value": "bob-page"}),
+    )
+    .await;
+
+    let get = json!({"type": "GetValue", "key": shared});
+    assert_eq!(
+        h.device(&alice_token, get.clone()).await.json()["value"],
+        "alice-device"
+    );
+    assert_eq!(
+        h.api(&mut alice, get.clone()).await.json()["value"],
+        "alice-device"
+    );
+    assert_eq!(
+        h.api(&mut bob, get.clone()).await.json()["value"],
+        "bob-page"
+    );
+    assert_eq!(
+        h.device(&bob_token, get.clone()).await.json()["value"],
+        "bob-page"
+    );
+
+    h.device(&alice_token, json!({"type": "DeleteValue", "key": shared}))
+        .await;
+    assert_eq!(h.api(&mut bob, get).await.json()["value"], "bob-page");
+}
+
+#[tokio::test]
+async fn keys_are_validated_and_page_keys_still_work() {
+    let h = open_harness().await;
+    let mut alice = h.signed_in(1, "alice").await;
+    let too_long = "k".repeat(signaling::MAX_KEY_BYTES + 1);
+    for bad in [
+        "",
+        too_long.as_str(),
+        "room\u{0}offer",
+        "room\noffer",
+        "room offer",
+    ] {
+        let res = h
+            .api(
+                &mut alice,
+                json!({"type": "SetValue", "key": bad, "value": "v"}),
+            )
+            .await;
+        assert_eq!(res.status, StatusCode::UNPROCESSABLE_ENTITY, "{bad:?}");
+        assert_eq!(res.json()["errorType"], "InvalidRequest");
+    }
+    let longest = "k".repeat(signaling::MAX_KEY_BYTES);
+    let res = h
+        .api(
+            &mut alice,
+            json!({"type": "SetValue", "key": longest, "value": "v"}),
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::OK);
+
+    for (slot, value) in [("sdp-req", "offer"), ("sdp-res", "answer")] {
+        h.api(
+            &mut alice,
+            json!({"type": "SetValue", "key": slot, "value": value}),
+        )
+        .await;
+        let res = h
+            .api(&mut alice, json!({"type": "GetValue", "key": slot}))
+            .await;
+        assert_eq!(res.json()["value"], value);
+    }
+}
+
+#[tokio::test]
+async fn keys_per_owner_are_capped() {
+    let settings = Settings {
+        signaling: signaling::Limits {
+            max_entries_per_owner: 2,
+            ..signaling::Limits::default()
+        },
+        ..Settings::default()
+    };
+    let h = harness(Allowlist::default(), settings).await;
+    let mut alice = h.signed_in(1, "alice").await;
+    let (token, _) = h.issued_token(&mut alice, "camera").await;
+    for suffix in ["offer", "answer"] {
+        let res = h
+            .device(
+                &token,
+                json!({"type": "SetValue", "key": key(suffix), "value": "v"}),
+            )
+            .await;
+        assert_eq!(res.status, StatusCode::OK);
+    }
+    let res = h
+        .device(
+            &token,
+            json!({"type": "SetValue", "key": key("hello"), "value": "v"}),
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::INSUFFICIENT_STORAGE);
+    assert_eq!(res.json()["errorType"], "TooManyKeys");
+    let mut bob = h.signed_in(2, "bob").await;
+    let res = h
+        .api(
+            &mut bob,
+            json!({"type": "SetValue", "key": key("hello"), "value": "v"}),
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::OK, "other owners are unaffected");
+}
+
+#[tokio::test]
+async fn bearer_callers_share_the_owner_rate_limit() {
+    let settings = Settings {
+        api_quota: Quota {
+            burst: 3,
+            per_second: 0.001,
+        },
+        ..Settings::default()
+    };
+    let h = harness(Allowlist::default(), settings).await;
+    let mut alice = h.signed_in(1, "alice").await;
+    let (token, _) = h.issued_token(&mut alice, "camera").await;
+    let get = json!({"type": "GetValue", "key": key("offer")});
+    assert_eq!(h.device(&token, get.clone()).await.status, StatusCode::OK);
+    assert_eq!(h.device(&token, get.clone()).await.status, StatusCode::OK);
+    let res = h.device(&token, get).await;
+    assert_eq!(res.status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(res.json()["errorType"], "RateLimited");
 }
