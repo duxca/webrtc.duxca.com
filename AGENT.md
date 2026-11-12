@@ -21,8 +21,9 @@ This project is a **Rust-based web server** that provides backend services for a
 - `main.rs`: reads configuration from the environment and starts the server.
 - `app.rs`: builds the `axum` router, session layer (signed `__Host-` cookie, bounded in-memory store) and shared state. `Settings` holds every limit.
 - `auth.rs`: GitHub OAuth2 with PKCE (`/login`, `/oauth/callback`, `/logout`). The pending login (state + PKCE verifier) is kept in a signed cookie, not in the session store. Optional `ALLOWED_GITHUB_IDS` allowlist. Signing out rotates the user's session secret, which ends all of that user's sessions.
-- `web.rs`: `/api`, a JSON-RPC-style endpoint (`GetMe`, `SetValue`, `GetValue`, `DeleteValue`). Authentication and per-user rate limiting run before the body is read.
-- `signaling.rs`: the signaling store. Keys are `(user id, slot)` with `slot` in `sdp-req` / `sdp-res`, so a client can only reach its own data. Values are size-limited and expire.
+- `web.rs`: `/api`, a JSON-RPC-style endpoint (`GetMe`, `SetValue`, `GetValue`, `DeleteValue`). Callers authenticate with a session or an `Authorization: Bearer` API token (`GetMe` is session-only). Authentication and per-owner rate limiting run before the body is read.
+- `signaling.rs`: the signaling store. Keys are validated free-form strings stored as `(owner id, key)`, so a client can only reach its owner's data. Values are size-limited and expire; keys per owner are capped.
+- `tokens.rs`: in-memory API tokens (`wrtc_` + 32 random bytes, SHA-256 stored) and the session-only `/api/tokens` endpoints.
 - `security.rs`: same-origin check for state-changing requests and security response headers (CSP etc.). There is no CORS layer.
 - `session_store.rs`, `rate_limit.rs`, `error.rs`: bounded session store, token-bucket limiter, opaque 500 responses.
 - `tests.rs`: end-to-end tests against a fake GitHub OAuth server.
@@ -32,4 +33,4 @@ This project is a **Rust-based web server** that provides backend services for a
 1.  A user accesses the frontend application, which is served from the `dist/` directory.
 2.  To perform any action, the user must log in. They are redirected to GitHub to authorize the application.
 3.  Upon successful authorization, the server creates a session for the user.
-4.  The authenticated frontend calls `/api` to exchange SDP offers/answers between two devices of the same user through the `sdp-req` / `sdp-res` slots.
+4.  The authenticated frontend calls `/api` to exchange SDP offers/answers between two devices of the same user through the `sdp-req` / `sdp-res` keys. Non-browser devices use API tokens and their own keys in the same owner namespace.

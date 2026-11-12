@@ -6,8 +6,9 @@ use axum::response::{IntoResponse, Response as HttpResponse};
 use axum::Json;
 
 use crate::app::AppState;
-use crate::auth::{self, User};
+use crate::auth;
 use crate::signaling::SetError;
+use crate::tokens;
 
 pub mod get_me {
     #[derive(Debug, serde::Deserialize, serde::Serialize, Clone, PartialEq)]
@@ -22,12 +23,12 @@ pub mod get_me {
 }
 
 pub mod set_value {
-    use crate::signaling::Slot;
+    use crate::signaling::Key;
 
     #[derive(Debug, serde::Deserialize, serde::Serialize, Clone, PartialEq)]
     #[serde(rename_all = "camelCase")]
     pub struct Request {
-        pub key: Slot,
+        pub key: Key,
         pub value: String,
     }
 
@@ -36,12 +37,12 @@ pub mod set_value {
     pub struct Response {}
 }
 pub mod get_value {
-    use crate::signaling::Slot;
+    use crate::signaling::Key;
 
     #[derive(Debug, serde::Deserialize, serde::Serialize, Clone, PartialEq)]
     #[serde(rename_all = "camelCase")]
     pub struct Request {
-        pub key: Slot,
+        pub key: Key,
     }
 
     #[derive(Debug, serde::Deserialize, serde::Serialize, Clone, PartialEq, Eq)]
@@ -51,12 +52,12 @@ pub mod get_value {
     }
 }
 pub mod delete_value {
-    use crate::signaling::Slot;
+    use crate::signaling::Key;
 
     #[derive(Debug, serde::Deserialize, serde::Serialize, Clone, PartialEq)]
     #[serde(rename_all = "camelCase")]
     pub struct Request {
-        pub key: Slot,
+        pub key: Key,
     }
 
     #[derive(Debug, serde::Deserialize, serde::Serialize, Clone, PartialEq, Eq)]
@@ -109,17 +110,35 @@ pub enum ErrorKind {
     InvalidRequest,
     ValueTooLarge,
     StoreFull,
+    TooManyKeys,
     RateLimited,
+    TooManyTokens,
+    NotFound,
 }
 
-fn error(status: StatusCode, kind: ErrorKind) -> HttpResponse {
+pub(crate) fn error(status: StatusCode, kind: ErrorKind) -> HttpResponse {
     (status, Json(Response::Error(kind))).into_response()
 }
 
-/// Signed-in caller of `/api`. As a parts extractor it runs before the body is
-/// read, so unauthenticated or throttled requests never get their body parsed.
-pub struct ApiCaller(User);
+/// Who is calling `/api`. Either way the store is addressed by the owner's
+/// GitHub id, so a caller only ever reaches its owner's own keys.
+pub enum ApiCaller {
+    /// Signed-in browser session.
+    Session(i64),
+    /// `Authorization: Bearer` token issued by the owner (non-browser clients).
+    Token(i64),
+}
 
+impl ApiCaller {
+    fn owner(&self) -> i64 {
+        match *self {
+            Self::Session(owner) | Self::Token(owner) => owner,
+        }
+    }
+}
+
+/// As a parts extractor this runs before the body is read, so unauthenticated,
+/// badly authenticated or throttled requests never get their body parsed.
 impl FromRequestParts<AppState> for ApiCaller {
     type Rejection = HttpResponse;
 
@@ -127,25 +146,37 @@ impl FromRequestParts<AppState> for ApiCaller {
         parts: &mut Parts,
         app: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let user = auth::current_user(parts, app.settings.session_max_age)
-            .await
-            .map_err(IntoResponse::into_response)?;
-        let Some(user) = user else {
-            return Err(error(StatusCode::UNAUTHORIZED, ErrorKind::Unauthenticated));
+        let unauthenticated = || error(StatusCode::UNAUTHORIZED, ErrorKind::Unauthenticated);
+        // An Authorization header is always checked on its own merits and never
+        // falls back to the session cookie.
+        let caller = match tokens::bearer_token(&parts.headers) {
+            Some(token) => {
+                let owner = token
+                    .and_then(|token| app.tokens.authenticate(token))
+                    .ok_or_else(unauthenticated)?;
+                Self::Token(owner)
+            }
+            None => {
+                let user = auth::current_user(parts, app.settings.session_max_age)
+                    .await
+                    .map_err(IntoResponse::into_response)?
+                    .ok_or_else(unauthenticated)?;
+                Self::Session(user.id)
+            }
         };
-        if !app.api_limiter.check(user.id) {
+        if !app.api_limiter.check(caller.owner()) {
             return Err(error(StatusCode::TOO_MANY_REQUESTS, ErrorKind::RateLimited));
         }
-        Ok(Self(user))
+        Ok(caller)
     }
 }
 
 /// POST /api
 ///
-/// Every slot is addressed relative to the caller, so one user can never read
-/// or overwrite another user's signaling data.
+/// Keys are free-form but always scoped to the caller's owner, so one user can
+/// never read or overwrite another user's signaling data.
 pub async fn api(
-    ApiCaller(user): ApiCaller,
+    caller: ApiCaller,
     State(app): State<AppState>,
     body: Result<Json<Request>, JsonRejection>,
 ) -> HttpResponse {
@@ -153,10 +184,17 @@ pub async fn api(
         Ok(Json(req)) => req,
         Err(rejection) => return error(rejection.status(), ErrorKind::InvalidRequest),
     };
+    let owner = caller.owner();
     let res: Response = match req {
-        Request::GetMe(get_me::Request {}) => get_me::Response { user_id: user.id }.into(),
+        Request::GetMe(get_me::Request {}) => match caller {
+            ApiCaller::Session(user_id) => get_me::Response { user_id }.into(),
+            // Identity lookups are for the signed-in page only.
+            ApiCaller::Token(_) => {
+                return error(StatusCode::UNAUTHORIZED, ErrorKind::Unauthenticated)
+            }
+        },
         Request::SetValue(set_value::Request { key, value }) => {
-            match app.signaling.set(user.id, key, value) {
+            match app.signaling.set(owner, key, value) {
                 Ok(()) => set_value::Response {}.into(),
                 Err(SetError::ValueTooLarge) => {
                     return error(StatusCode::PAYLOAD_TOO_LARGE, ErrorKind::ValueTooLarge)
@@ -164,14 +202,17 @@ pub async fn api(
                 Err(SetError::StoreFull) => {
                     return error(StatusCode::SERVICE_UNAVAILABLE, ErrorKind::StoreFull)
                 }
+                Err(SetError::TooManyKeys) => {
+                    return error(StatusCode::INSUFFICIENT_STORAGE, ErrorKind::TooManyKeys)
+                }
             }
         }
         Request::GetValue(get_value::Request { key }) => get_value::Response {
-            value: app.signaling.get(user.id, key),
+            value: app.signaling.get(owner, key),
         }
         .into(),
         Request::DeleteValue(delete_value::Request { key }) => {
-            app.signaling.delete(user.id, key);
+            app.signaling.delete(owner, key);
             delete_value::Response {}.into()
         }
     };
@@ -181,17 +222,26 @@ pub async fn api(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::signaling::Slot;
+    use crate::signaling::Key;
 
     #[test]
-    fn keys_are_slot_names_only() {
-        let req: Request = serde_json::from_str(r#"{"type":"GetValue","key":"sdp-res"}"#).unwrap();
+    fn keys_are_validated_free_form_strings() {
+        let req: Request =
+            serde_json::from_str(r#"{"type":"GetValue","key":"aicast-webrtc/r00m/offer"}"#)
+                .unwrap();
         assert_eq!(
             req,
-            Request::GetValue(get_value::Request { key: Slot::SdpRes })
+            Request::GetValue(get_value::Request {
+                key: Key::try_from("aicast-webrtc/r00m/offer".to_owned()).unwrap()
+            })
         );
-        assert!(
-            serde_json::from_str::<Request>(r#"{"type":"GetValue","key":"sdp-res-1"}"#).is_err()
-        );
+        for bad in [r#""""#, r#""a b""#, r#""a\u0000b""#] {
+            let json = format!(r#"{{"type":"GetValue","key":{bad}}}"#);
+            let err = serde_json::from_str::<Request>(&json).unwrap_err();
+            assert!(
+                err.is_data(),
+                "{bad}: rejected by key validation, not syntax: {err}"
+            );
+        }
     }
 }

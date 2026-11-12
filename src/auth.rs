@@ -371,7 +371,7 @@ fn random_secret() -> anyhow::Result<[u8; 32]> {
     Ok(secret)
 }
 
-fn unix_now() -> u64 {
+pub(crate) fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())

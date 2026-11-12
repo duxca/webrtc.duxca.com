@@ -7,6 +7,7 @@ mod session_store;
 mod signaling;
 #[cfg(test)]
 mod tests;
+mod tokens;
 mod web;
 
 #[cfg(all(feature = "local", not(debug_assertions)))]
