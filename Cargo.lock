@@ -1658,7 +1658,7 @@ dependencies = [
  "async-trait",
  "axum",
  "axum-login",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "derive_more",
  "dotenvy",
